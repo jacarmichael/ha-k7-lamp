@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- Pass Home Assistant's hassfest validation (manifest key order, no braces in action descriptions).
+
 ## 0.5.0 (first public release)
 
 - Local control of a Noo-Psyche K7 Pro over the LAN (TCP 8266); no cloud, no extra hardware.

@@ -121,7 +121,7 @@
         },
         "channels": {
           "name": "Channels",
-          "description": "Channel index (0 White, 1 Royal Blue, 2 Green, 3 UV, 4 Cyan, 5 Red) to share of the moon level in %, e.g. {\"1\": 100, \"4\": 70}."
+          "description": "Share of the moon level per channel, in %, keyed by channel number (0 White, 1 Royal Blue, 2 Green, 3 UV, 4 Cyan, 5 Red). Example: Royal Blue 100 and Cyan 70."
         }
       }
     }
