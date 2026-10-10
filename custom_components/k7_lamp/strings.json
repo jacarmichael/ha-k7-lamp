@@ -1,0 +1,129 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Noo-Psyche K7 lamp",
+        "description": "The lamp must be in LAN mode (joined to your Wi-Fi). Setup only reads from the lamp.",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not read the lamp. Check the IP, that port 8266 is reachable from Home Assistant, and that the lamp is in LAN mode."
+    },
+    "abort": {
+      "already_configured": "This lamp is already configured.",
+      "unsupported_model": "This lamp looks like a K7 Mini. This integration currently supports the K7 Pro only."
+    }
+  },
+  "services": {
+    "set_schedule": {
+      "name": "Set schedule",
+      "description": "Write a 24-slot schedule to the lamp (ALL_SET, auto mode, current local time). Skipped if the lamp already has it.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Lamp",
+          "description": "Needed only when several K7 lamps are set up."
+        },
+        "qr_payload": {
+          "name": "QR payload",
+          "description": "Text from a Noo-Psyche app / bitbarista schedule QR code."
+        },
+        "schedule": {
+          "name": "Schedule",
+          "description": "24 rows of [hour, minute, white, royal blue, green, UV, cyan, red]."
+        },
+        "manual": {
+          "name": "Manual levels",
+          "description": "6 levels used in manual mode. Defaults to the QR code's or the lamp's current values."
+        },
+        "align_day_start": {
+          "name": "Align to day start",
+          "description": "Shift the schedule so its photoperiod starts at the 'Day starts at' hour set in the editor card."
+        }
+      }
+    },
+    "sync_clock": {
+      "name": "Sync clock",
+      "description": "Send Home Assistant's local time to the lamp.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Lamp",
+          "description": "Needed only when several K7 lamps are set up."
+        }
+      }
+    },
+    "start_acclimation": {
+      "name": "Start acclimation",
+      "description": "Ramp the lamp's schedule linearly from a start intensity to 100% over a number of days. The scaled schedule is written once a day shortly before lights-on. The target is the given profile or QR code, or the lamp's current schedule.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Lamp",
+          "description": "Needed only when several K7 lamps are set up."
+        },
+        "start_percent": {
+          "name": "Start intensity",
+          "description": "Intensity on day 0, as a percentage of the target schedule."
+        },
+        "days": {
+          "name": "Duration",
+          "description": "Days until the full schedule is reached."
+        },
+        "profile": {
+          "name": "Profile",
+          "description": "Name of a saved profile to use as the target."
+        },
+        "qr_payload": {
+          "name": "QR payload",
+          "description": "A Noo-Psyche app schedule QR code to use as the target."
+        },
+        "align_day_start": {
+          "name": "Align to day start",
+          "description": "Shift the schedule so its photoperiod starts at the 'Day starts at' hour set in the editor card."
+        }
+      }
+    },
+    "stop_acclimation": {
+      "name": "Stop acclimation",
+      "description": "End a running acclimation.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Lamp",
+          "description": "Needed only when several K7 lamps are set up."
+        },
+        "keep_current": {
+          "name": "Keep current intensity",
+          "description": "Keep today's reduced schedule instead of switching to the full target."
+        }
+      }
+    },
+    "set_moonlight": {
+      "name": "Set moonlight",
+      "description": "Add night-time light that follows the real moon at Home Assistant's location: its brightness tracks the moon's illumination, and with 'Follow the moon' it's only on while the moon is above the horizon. The lamp gets a new 24-hour plan daily, shortly before lights-on.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Lamp",
+          "description": "Needed only when several K7 lamps are set up."
+        },
+        "enabled": {
+          "name": "Enabled",
+          "description": "Turn moonlight on or off."
+        },
+        "max_level": {
+          "name": "Level at full moon",
+          "description": "Lamp level (%) at full moon high in the sky."
+        },
+        "follow_moon": {
+          "name": "Follow the moon",
+          "description": "Only light while the moon is up, brightening as it rises. Off: phase-based level all night."
+        },
+        "channels": {
+          "name": "Channels",
+          "description": "Channel index (0 White, 1 Royal Blue, 2 Green, 3 UV, 4 Cyan, 5 Red) to share of the moon level in %, e.g. {\"1\": 100, \"4\": 70}."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,94 @@
+set_schedule:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: k7_lamp
+    qr_payload:
+      example: "323232323232#0000000000000000..."
+      selector:
+        text:
+          multiline: true
+    schedule:
+      selector:
+        object:
+    manual:
+      selector:
+        object:
+    align_day_start:
+      default: false
+      selector:
+        boolean:
+sync_clock:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: k7_lamp
+start_acclimation:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: k7_lamp
+    start_percent:
+      required: true
+      default: 50
+      selector:
+        number:
+          min: 1
+          max: 99
+          unit_of_measurement: "%"
+    days:
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: days
+    profile:
+      selector:
+        text:
+    qr_payload:
+      selector:
+        text:
+          multiline: true
+    align_day_start:
+      default: false
+      selector:
+        boolean:
+stop_acclimation:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: k7_lamp
+    keep_current:
+      default: false
+      selector:
+        boolean:
+set_moonlight:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: k7_lamp
+    enabled:
+      required: true
+      selector:
+        boolean:
+    max_level:
+      default: 15
+      selector:
+        number:
+          min: 1
+          max: 50
+          unit_of_measurement: "%"
+    follow_moon:
+      default: true
+      selector:
+        boolean:
+    channels:
+      example: '{"1": 100, "4": 70}'
+      selector:
+        object:
