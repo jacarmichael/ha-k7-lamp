@@ -12,5 +12,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: pip install pytest
-      - run: pytest -q
+      - run: pip install pytest homeassistant==2025.2.0
+      - run: python -m pytest -q
+      - run: node --test tests/test_frontend.cjs

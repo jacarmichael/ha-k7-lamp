@@ -25,7 +25,7 @@ class K7ConfigFlow(ConfigFlow, domain=DOMAIN):
             except K7Error:
                 errors["base"] = "cannot_connect"
             else:
-                if "mini" in state.name.lower():
+                if state.name.lower().startswith("k7m") or "mini" in state.name.lower():
                     return self.async_abort(reason="unsupported_model")
                 await self.async_set_unique_id(state.name or user_input[CONF_HOST])
                 self._abort_if_unique_id_configured(updates=user_input)

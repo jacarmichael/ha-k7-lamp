@@ -7,7 +7,7 @@ from homeassistant.components.binary_sensor import (
 )
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import K7ConfigEntry, K7Coordinator
 from .entity import K7Entity
@@ -16,7 +16,7 @@ from .entity import K7Entity
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: K7ConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     async_add_entities([K7ConnectivitySensor(entry.runtime_data)])
 

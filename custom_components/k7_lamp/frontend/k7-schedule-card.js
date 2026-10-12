@@ -6,7 +6,7 @@
  * bundled presets come from bitbarista/k7-led-controller (MIT); see NOTICE.md.
  */
 const BASE = "/k7_lamp";
-const VERSION = "0.5.0";
+const VERSION = "0.5.2";
 const COLORS = ["#f5f5f5", "#3b3bff", "#22c55e", "#9b30ff", "#00d5ff", "#ff3030"];
 
 const loaded = {};
@@ -37,29 +37,42 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
 // Mirrors protocol.py day_start / photoperiod / shift_rows / align_day_start.
 const lit = (r) => r.slice(2).some((v) => v > 0);
 const sortRows = (s) => [...s].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+const activeRows = (s) => sortRows([...new Map(s.filter((r) => r.some((v) => v !== 0))
+  .map((r) => [r[0] * 60 + r[1], r])).values()]);
+const fmtHour = (h) => `${pad(Math.floor(h))}:${pad(Math.round((h % 1) * 60))}`;
 function dayStart(schedule) {
-  const rows = sortRows(schedule);
+  const rows = activeRows(schedule);
   for (let i = 0; i < rows.length; i++) {
-    if (lit(rows[i]) && !lit(rows[(i - 1 + rows.length) % rows.length])) return rows[i][0];
+    if (lit(rows[i]) && !lit(rows[(i - 1 + rows.length) % rows.length])) return rows[i][0] + rows[i][1] / 60;
   }
   return null;
 }
 function photoperiod(schedule) {
   const start = dayStart(schedule);
   if (start === null) return null;
-  const rows = sortRows(schedule);
-  const idx = rows.findIndex((r) => r[0] === start);
+  const rows = activeRows(schedule);
+  const idx = rows.findIndex((r, i) => lit(r) && !lit(rows[(i - 1 + rows.length) % rows.length]));
   for (let k = 1; k <= rows.length; k++) {
     const r = rows[(idx + k) % rows.length];
-    if (!lit(r)) return [start, r[0]];
+    if (!lit(r)) return [start, r[0] + r[1] / 60];
   }
   return null;
 }
 function shiftRows(schedule, hours) {
-  const rows = sortRows(schedule);
-  const n = rows.length;
-  const h = ((hours % n) + n) % n;
-  return rows.map((r, i) => [r[0], r[1], ...rows[(i - h + n) % n].slice(2)]);
+  const delta = Math.round(hours * 60);
+  const shiftedMinute = (r) => ((r[0] * 60 + r[1] + delta) % 1440 + 1440) % 1440;
+  const active = activeRows(schedule);
+  active.forEach((r, i) => {
+    if (shiftedMinute(r) === 0 && !lit(r)
+      && (lit(active[(i - 1 + active.length) % active.length]) || lit(active[(i + 1) % active.length]))) {
+      throw new Error("Cannot shift a dark boundary to 00:00: K7 treats it as a disabled slot");
+    }
+  });
+  return sortRows(schedule.map((r) => {
+    if (!r.some((v) => v !== 0)) return [...r];
+    const minute = shiftedMinute(r);
+    return [Math.floor(minute / 60), minute % 60, ...r.slice(2)];
+  }));
 }
 function alignDayStart(schedule, hour) {
   const cur = dayStart(schedule);
@@ -119,7 +132,8 @@ class K7ScheduleCard extends HTMLElement {
     this._channels = ["White", "Royal Blue", "Green", "UV", "Cyan", "Red"];
     this._visible = this._channels.map(() => true);
     this._linked = false;
-    this._hour = 12;
+    this._slot = 12;
+    this._cameraRequest = 0;
     this._panel = null; // "import" | "export" | "save" | "confirm"
     this._msg = null;
     this._render();
@@ -177,7 +191,7 @@ class K7ScheduleCard extends HTMLElement {
     if (want === null || want === undefined || this._keepTimes) return { schedule, note: "" };
     const cur = dayStart(schedule);
     if (cur === null || cur === want) return { schedule, note: "" };
-    const diff = ((want - cur + 36) % 24) - 12;
+    const diff = Math.round((((want - cur + 36) % 24) - 12) * 100) / 100;
     return { schedule: alignDayStart(schedule, want),
              note: ` Shifted ${diff > 0 ? "+" : ""}${diff} h to start at ${pad(want)}:00.` };
   }
@@ -200,6 +214,11 @@ class K7ScheduleCard extends HTMLElement {
     this._render();
   }
 
+  _setPanel(panel) {
+    if (this._panel === "import" && panel !== "import") this._stopCamera();
+    this._panel = panel;
+  }
+
   // ---------- rendering ----------
 
   _render() {
@@ -218,6 +237,8 @@ class K7ScheduleCard extends HTMLElement {
             : (this._lamp?.program ? "Matches target" : "Matches lamp")}</span>` : ""}
         </div>
         ${this._msg ? `<div class="msg ${this._msg.kind}">${esc(this._msg.text)}<button class="x" data-act="dismiss">×</button></div>` : ""}
+        ${lamp?.program_error ? `<div class="msg error">${esc(lamp.program_error)}</div>` : ""}
+        ${lamp?.pending ? `<div class="msg">A plan update is pending. It will retry in the next safe window, or you can Apply now.</div>` : ""}
         ${ready && this._acc() ? this._accBanner() : ""}
         ${ready ? this._body() : `<div class="loading">Loading…</div>`}
       </ha-card>`;
@@ -239,7 +260,8 @@ class K7ScheduleCard extends HTMLElement {
       <div class="acctext"><b>Acclimation</b> · day ${a.day} of ${a.days} · <b>${a.percent}%</b>
         <span class="muted">(${a.start_percent}% → 100%, ends ${esc(a.ends)})</span></div>
       <div class="bar"><div style="width:${pct}%"></div></div>
-      <div class="muted small">The chart shows the full target. The lamp runs it at ${a.percent}% today; the next step is written at ${this._lamp.rebuild_time || "dawn"}.</div>
+      <div class="muted small">The chart shows the full target. Planned today: ${a.percent}%. Last confirmed: ${a.applied_percent == null ? "unknown" : `${a.applied_percent}%`}.
+      ${this._lamp.rebuild_time ? `Daily update window starts at ${this._lamp.rebuild_time}.` : "No safe dark interval; automatic updates are paused."}</div>
       <button data-act="acc-stop">Stop…</button></div>`;
   }
 
@@ -253,7 +275,7 @@ class K7ScheduleCard extends HTMLElement {
     const len = period ? ((period[1] - period[0] + 24) % 24 || 24) : 0;
     return `<div class="row daystart">
       <label>Day starts at <select data-act="daystart" ${cur === null ? "disabled" : ""}>${opts}</select></label>
-      <span class="muted">${period ? `photoperiod ${pad(period[0])}:00–${pad(period[1])}:00 (${len} h)` : "no dark period to shift"}</span>
+      <span class="muted">${period ? `photoperiod ${fmtHour(period[0])}–${fmtHour(period[1])} (${Math.round(len * 100) / 100} h)` : "no dark period to shift"}</span>
       ${pref != null && cur !== null && cur !== pref ? `<button data-act="align">Shift to ${pad(pref)}:00</button>` : ""}
       <label class="tog"><input type="checkbox" data-act="keeptimes" ${this._keepTimes ? "" : "checked"}>Align loaded profiles</label>
       <span class="grow"></span>
@@ -275,21 +297,21 @@ class K7ScheduleCard extends HTMLElement {
   _body() {
     const d = this._draft;
     const strip = d.schedule
-      .map((r, i) => `<div class="cell ${i === this._hourIndex() ? "sel" : ""}" data-slot="${i}"
+      .map((r, i) => `<div class="cell ${i === this._slotIndex() ? "sel" : ""}" data-slot="${i}"
           style="background:${blend(r.slice(2))}" title="${pad(r[0])}:${pad(r[1])}"><span>${pad(r[0])}</span></div>`)
       .join("");
     const toggles = this._channels
       .map((c, i) => `<label class="tog"><input type="checkbox" data-ch="${i}" ${this._visible[i] ? "checked" : ""}>
           <i style="background:${COLORS[i]}"></i>${esc(c)}</label>`)
       .join("");
-    const row = d.schedule[this._hourIndex()];
+    const row = d.schedule[this._slotIndex()];
     const sliders = this._channels
       .map((c, i) => `<div class="sl"><span class="lbl"><i style="background:${COLORS[i]}"></i>${esc(c)}</span>
           <input type="range" min="0" max="100" value="${row[i + 2]}" data-lv="${i}">
           <input type="number" min="0" max="100" value="${row[i + 2]}" data-num="${i}"></div>`)
       .join("");
     const profileOpts = Object.keys(this._profiles || {})
-      .map((n) => `<option value="p:${esc(n)}">${esc(n)}</option>`)
+      .map((n) => `<option value="p:${esc(n)}">${esc(n === "Original (from lamp)" ? "Original (legacy, lamp unknown)" : n)}</option>`)
       .join("");
     const presetOpts = (this._presets || [])
       .map((p, i) => `<option value="b:${i}">${esc(p.name)}${p.source === "community" ? " (community)" : ""}</option>`)
@@ -311,6 +333,7 @@ class K7ScheduleCard extends HTMLElement {
         <select data-act="pick">
           <option value="">Load a schedule…</option>
           <option value="lamp">Current lamp schedule</option>
+          ${this._lamp.original ? `<option value="original">${esc(this._lamp.original.name)}</option>` : ""}
           ${profileOpts ? `<optgroup label="Saved profiles">${profileOpts}</optgroup>` : ""}
           ${presetOpts ? `<optgroup label="Presets (bitbarista)">${presetOpts}</optgroup>` : ""}
         </select>
@@ -325,7 +348,7 @@ class K7ScheduleCard extends HTMLElement {
         <button data-act="moon">Moonlight…</button>
         <span class="grow"></span>
         <button data-act="revert" ${this._dirty() ? "" : "disabled"}>Revert</button>
-        <button class="primary" data-act="apply" ${this._dirty() && this._lamp.available ? "" : "disabled"}>${this._acc() ? "Update target" : "Apply to lamp"}</button>
+        <button class="primary" data-act="apply" ${(this._dirty() || this._lamp.pending) && this._lamp.available ? "" : "disabled"}>${this._lamp.program ? "Update target" : "Apply to lamp"}</button>
       </div>
       ${this._panelHtml()}`;
   }
@@ -343,7 +366,7 @@ class K7ScheduleCard extends HTMLElement {
       case "acc":
         return `<div class="panel">
           <p>Ramp up linearly to the <b>schedule in the editor</b> (the full target). Today's step is written
-          now; after that the lamp gets a new step every day at ${this._lamp.rebuild_time || "dawn"}, while it's still dark.</p>
+          now; after that ${this._lamp.rebuild_time ? `the daily update window starts at ${this._lamp.rebuild_time}, in the target's dark interval` : "automatic updates require a dark interval in the target schedule"}.</p>
           <div class="row">
             <label>Start at <input type="number" min="1" max="99" value="50" data-act="acc-start"> %</label>
             <label>over <input type="number" min="1" max="120" value="30" data-act="acc-days"> days</label>
@@ -357,7 +380,7 @@ class K7ScheduleCard extends HTMLElement {
             <input type="number" min="0" max="100" value="${w[i] ?? w[String(i)] ?? 0}" data-moonch="${i}">%</label>`).join("");
         return `<div class="panel">
           <p>Night-time light that follows the real moon over your home: brightness tracks the moon's
-          illumination, and the lamp gets a new 24-hour plan every day at ${this._lamp.rebuild_time || "dawn"}, before lights-on. Daylight hours are never dimmed;
+          illumination. ${this._lamp.rebuild_time ? `The daily update window starts at ${this._lamp.rebuild_time}, in the target's dark interval.` : "Automatic updates are paused until the target has a dark interval."} Daylight hours are never dimmed;
           the moon level is only used where it's brighter than your schedule.</p>
           <div class="row">
             <label class="tog"><input type="checkbox" data-moon="enabled" ${cfg.enabled ? "checked" : ""}>Moonlight on</label>
@@ -373,7 +396,7 @@ class K7ScheduleCard extends HTMLElement {
         return `<div class="panel">
           <p>Stop the acclimation now?</p>
           <div class="row"><span class="grow"></span><button data-act="cancel">Cancel</button>
-          <button data-act="acc-keep">Keep today's ${this._acc()?.percent}%</button>
+          <button data-act="acc-keep" ${this._acc()?.applied_percent == null ? "disabled" : ""}>Keep confirmed ${this._acc()?.applied_percent ?? "unknown"}%</button>
           <button class="primary" data-act="acc-full">Go to the full schedule</button></div></div>`;
       case "save":
         return `<div class="panel"><div class="row">
@@ -401,9 +424,8 @@ class K7ScheduleCard extends HTMLElement {
     }
   }
 
-  _hourIndex() {
-    const i = this._draft.schedule.findIndex((r) => r[0] === this._hour);
-    return i < 0 ? 0 : i;
+  _slotIndex() {
+    return Math.max(0, Math.min(this._slot ?? 0, this._draft.schedule.length - 1));
   }
 
   _selectedProfile() {
@@ -422,7 +444,8 @@ class K7ScheduleCard extends HTMLElement {
         datasets: this._channels.map((c, ch) => ({
           label: c,
           hidden: !this._visible[ch],
-          data: this._draft.schedule.map((r) => ({ x: r[0] + r[1] / 60, y: r[ch + 2] })),
+          data: this._draft.schedule.map((r) => ({ x: r[0] + r[1] / 60, y: r.some((v) => v !== 0) ? r[ch + 2] : null })),
+          spanGaps: true,
           borderColor: COLORS[ch],
           backgroundColor: COLORS[ch],
           borderWidth: 2,
@@ -432,7 +455,8 @@ class K7ScheduleCard extends HTMLElement {
         })).concat(this._showEff && this._lamp.effective ? this._channels.map((c, ch) => ({
           label: `${c} (lamp)`,
           hidden: !this._visible[ch],
-          data: this._lamp.effective.schedule.map((r) => ({ x: r[0] + r[1] / 60, y: r[ch + 2] })),
+          data: this._lamp.effective.schedule.map((r) => ({ x: r[0] + r[1] / 60, y: r.some((v) => v !== 0) ? r[ch + 2] : null })),
+          spanGaps: true,
           borderColor: COLORS[ch],
           borderDash: [5, 4],
           borderWidth: 1.5,
@@ -446,7 +470,7 @@ class K7ScheduleCard extends HTMLElement {
         maintainAspectRatio: false,
         interaction: { mode: "nearest", intersect: true },
         scales: {
-          x: { type: "linear", min: 0, max: 23, ticks: { stepSize: 2, color: text, callback: (v) => pad(v) }, grid: { color: grid } },
+          x: { type: "linear", min: 0, max: 24, ticks: { stepSize: 2, color: text, callback: (v) => pad(v) }, grid: { color: grid } },
           y: { min: 0, max: 100, ticks: { stepSize: 25, color: text, callback: (v) => `${v}%` }, grid: { color: grid } },
         },
         plugins: {
@@ -464,7 +488,7 @@ class K7ScheduleCard extends HTMLElement {
               if (this._linked) {
                 const delta = v - this._dragFrom;
                 this._chart.data.datasets.forEach((set, ch) => {
-                  if (ch !== ds && !set.hidden) set.data[idx].y = clamp(this._draft.schedule[idx][ch + 2] + delta);
+                  if (ch < this._channels.length && ch !== ds && !set.hidden) set.data[idx].y = clamp(this._draft.schedule[idx][ch + 2] + delta);
                 });
                 this._chart.update("none");
               }
@@ -479,14 +503,14 @@ class K7ScheduleCard extends HTMLElement {
                   if (vis && ch !== ds) row[ch + 2] = clamp(row[ch + 2] + delta);
                 });
               }
-              this._hour = row[0];
+              this._slot = idx;
               this._render();
             },
           },
         },
         onClick: (e, els) => {
           if (els.length) {
-            this._hour = this._draft.schedule[els[0].index][0];
+            this._slot = els[0].index;
             this._render();
           }
         },
@@ -498,7 +522,7 @@ class K7ScheduleCard extends HTMLElement {
     const root = this.shadowRoot;
     const on = (sel, ev, fn) => root.querySelectorAll(sel).forEach((el) => el.addEventListener(ev, fn));
     on("[data-slot]", "click", (e) => {
-      this._hour = this._draft.schedule[+e.currentTarget.dataset.slot][0];
+      this._slot = +e.currentTarget.dataset.slot;
       this._render();
     });
     on("[data-ch]", "change", (e) => {
@@ -507,7 +531,7 @@ class K7ScheduleCard extends HTMLElement {
     });
     on("[data-lv],[data-num]", "change", (e) => {
       const ch = +(e.target.dataset.lv ?? e.target.dataset.num);
-      const row = this._draft.schedule[this._hourIndex()];
+      const row = this._draft.schedule[this._slotIndex()];
       const v = clamp(e.target.value);
       const delta = v - row[ch + 2];
       row[ch + 2] = v;
@@ -551,17 +575,19 @@ class K7ScheduleCard extends HTMLElement {
   }
 
   _pick(value) {
-    if (!value) return;
-    let src = null;
-    if (value === "lamp") src = this._lampData();
-    else if (value.startsWith("p:")) src = this._profiles[value.slice(2)];
-    else if (value.startsWith("b:")) src = this._presets[+value.slice(2)];
-    if (!src) return;
-    if (value === "lamp") src = this._baseline();
-    this._source = value;
-    const r = value === "lamp" ? { schedule: clone(src.schedule), note: "" } : this._aligned(clone(src.schedule));
-    this._draft = { manual: clone(src.manual), schedule: r.schedule };
-    this._info(value === "lamp" ? "Loaded the current schedule." : `Loaded into the draft.${r.note} Nothing changes on the lamp until you Apply.`);
+    try {
+      if (!value) return;
+      let src = null;
+      if (value === "lamp") src = this._lampData();
+      else if (value === "original") src = this._lamp.original;
+      else if (value.startsWith("p:")) src = this._profiles[value.slice(2)];
+      else if (value.startsWith("b:")) src = this._presets[+value.slice(2)];
+      if (!src) return;
+      const r = value === "lamp" || value === "original" ? { schedule: clone(src.schedule), note: "" } : this._aligned(clone(src.schedule));
+      this._source = value;
+      this._draft = { manual: clone(src.manual), schedule: r.schedule };
+      this._info(value === "lamp" ? "Loaded the current schedule." : `Loaded into the draft.${r.note} Nothing changes on the lamp until you Apply.`);
+    } catch (err) { this._error(err); }
   }
 
   async _action(act, e) {
@@ -571,15 +597,15 @@ class K7ScheduleCard extends HTMLElement {
         case "prev":
         case "next": {
           const n = this._draft.schedule.length;
-          const i = (this._hourIndex() + (act === "next" ? 1 : n - 1)) % n;
-          this._hour = this._draft.schedule[i][0];
+          const i = (this._slotIndex() + (act === "next" ? 1 : n - 1)) % n;
+          this._slot = i;
           return this._render();
         }
-        case "cancel": this._stopCamera(); this._panel = null; return this._render();
-        case "apply": this._panel = "confirm"; return this._render();
+        case "cancel": this._stopCamera(); this._setPanel(null); return this._render();
+        case "apply": this._setPanel("confirm"); return this._render();
         case "apply-yes": {
           const acc = !!this._acc();
-          this._panel = null;
+          this._setPanel(null);
           this._info("Writing schedule to the lamp…");
           const res = await this._ws({ type: "k7_lamp/apply", entry_id: this._lamp.entry_id, ...this._draft });
           this._updateLamp(res);
@@ -590,19 +616,21 @@ class K7ScheduleCard extends HTMLElement {
           this._draft = clone(this._baseline());
           this._source = this._acc() ? null : "lamp";
           return this._info(this._acc() ? "Draft reset to the acclimation target." : "Draft reset to the lamp's schedule.");
-        case "acc": this._panel = "acc"; return this._render();
-        case "moon": this._panel = "moon"; return this._render();
+        case "acc": this._setPanel("acc"); return this._render();
+        case "moon": this._setPanel("moon"); return this._render();
         case "moon-save": {
           const root = this.shadowRoot;
           const val = (k) => root.querySelector(`[data-moon=${k}]`);
           const channels = {};
           root.querySelectorAll("[data-moonch]").forEach((el) => (channels[el.dataset.moonch] = clamp(el.value)));
           const max = +val("max_level").value;
+          const enabled = val("enabled").checked;
+          const follow_moon = val("follow_moon").checked;
           if (!(max >= 1 && max <= 50)) return this._error("Level at full moon must be 1–50%.");
-          this._panel = null;
+          this._setPanel(null);
           this._info("Saving moonlight…");
           const res = await this._ws({ type: "k7_lamp/set_moonlight", entry_id: this._lamp.entry_id,
-            enabled: val("enabled").checked, max_level: max, follow_moon: val("follow_moon").checked, channels });
+            enabled, max_level: max, follow_moon, channels });
           this._updateLamp(res);
           return this._info(this._moonOn() ? "Moonlight saved; the lamp has tonight's moon." : "Moonlight off.");
         }
@@ -615,17 +643,17 @@ class K7ScheduleCard extends HTMLElement {
           const start = +this.shadowRoot.querySelector("[data-act=acc-start]").value;
           const days = +this.shadowRoot.querySelector("[data-act=acc-days]").value;
           if (!(start >= 1 && start <= 99 && days >= 1 && days <= 120)) return this._error("Start must be 1–99% and duration 1–120 days.");
-          this._panel = null;
+          this._setPanel(null);
           this._info("Starting acclimation…");
           const res = await this._ws({ type: "k7_lamp/start_acclimation", entry_id: this._lamp.entry_id,
             ...this._draft, start_percent: start, days });
           this._updateLamp(res);
           return this._info(`Acclimation started at ${start}% over ${days} days.`);
         }
-        case "acc-stop": this._panel = "acc-stop"; return this._render();
+        case "acc-stop": this._setPanel("acc-stop"); return this._render();
         case "acc-keep":
         case "acc-full": {
-          this._panel = null;
+          this._setPanel(null);
           const res = await this._ws({ type: "k7_lamp/stop_acclimation", entry_id: this._lamp.entry_id,
             keep_current: act === "acc-keep" });
           this._updateLamp(res);
@@ -635,14 +663,14 @@ class K7ScheduleCard extends HTMLElement {
         case "sync":
           await this._ws({ type: "k7_lamp/sync_clock", entry_id: this._lamp.entry_id });
           return this._info("Lamp clock set to Home Assistant's local time.");
-        case "save": this._panel = "save"; return this._render();
+        case "save": this._setPanel("save"); return this._render();
         case "save-yes": {
           const name = this.shadowRoot.querySelector("[data-act=name]").value.trim();
           if (!name) return;
           const res = await this._ws({ type: "k7_lamp/save_profile", name, ...this._draft });
           this._profiles = res.profiles;
           this._source = `p:${name}`;
-          this._panel = null;
+          this._setPanel(null);
           return this._info(`Saved profile "${name}".`);
         }
         case "delete": {
@@ -658,13 +686,13 @@ class K7ScheduleCard extends HTMLElement {
           this._source = null;
           return this._info(`Deleted profile "${name}".`);
         }
-        case "import": this._panel = "import"; this._msg = null; return this._render();
+        case "import": this._setPanel("import"); this._msg = null; return this._render();
         case "qrload": return this._importPayload(this.shadowRoot.querySelector("[data-act=qrtext]").value);
         case "camera": return this._stream ? (this._stopCamera(), this._render()) : this._startCamera();
         case "export": {
           const res = await this._ws({ type: "k7_lamp/to_qr", ...this._draft });
           this._qrPayload = res.payload;
-          this._panel = "export";
+          this._setPanel("export");
           return this._render();
         }
         case "copy":
@@ -685,7 +713,7 @@ class K7ScheduleCard extends HTMLElement {
       const r = this._aligned(res.schedule);
       this._draft = { manual: res.manual, schedule: r.schedule };
       this._source = null;
-      this._panel = null;
+      this._setPanel(null);
       this._info(`QR code loaded into the draft.${r.note} Check it, then Apply to lamp.`);
     } catch (err) {
       this._error(err);
@@ -720,15 +748,28 @@ class K7ScheduleCard extends HTMLElement {
   async _startCamera() {
     this._lastBad = null;
     if (!navigator.mediaDevices?.getUserMedia) return this._error("Camera not available here (needs HTTPS). Use an image instead.");
+    if (this._panel !== "import" || this._cameraPending) return;
+    const request = (this._cameraRequest || 0) + 1;
+    this._cameraRequest = request;
+    this._cameraPending = true;
     try {
-      this._stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (request !== this._cameraRequest || this._panel !== "import" || !this.isConnected) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      this._stream = stream;
       this._render();
     } catch (err) {
-      this._error(err);
+      if (request === this._cameraRequest) this._error(err);
+    } finally {
+      if (request === this._cameraRequest) this._cameraPending = false;
     }
   }
 
   _stopCamera() {
+    this._cameraRequest = (this._cameraRequest || 0) + 1;
+    this._cameraPending = false;
     this._stream?.getTracks().forEach((t) => t.stop());
     this._stream = null;
   }

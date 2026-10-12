@@ -4,7 +4,7 @@ from __future__ import annotations
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.const import PERCENTAGE, EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
 from .coordinator import K7ConfigEntry, K7Coordinator
@@ -24,7 +24,7 @@ def _now_minute() -> int:
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: K7ConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
     entities: list[SensorEntity] = [
@@ -114,9 +114,12 @@ class K7AcclimationSensor(K7Entity, SensorEntity):
         super().__init__(coordinator, "acclimation")
 
     @property
-    def native_value(self) -> int:
-        info = self.coordinator.acclimation_info()
-        return info["percent"] if info else 100
+    def native_value(self) -> int | None:
+        prog = self.coordinator.program()
+        if prog is None:
+            return 100
+        # A failed stop/target update must not claim a percentage never confirmed.
+        return (prog.get("applied") or {}).get("percent")
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -130,6 +133,8 @@ class K7AcclimationSensor(K7Entity, SensorEntity):
             "start_percent": info["start_percent"],
             "started": info["started"],
             "ends": info["ends"],
+            "planned_percent": info["percent"],
+            "applied_at": info["applied_at"],
         }
 
 

@@ -17,7 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import CARD_FILE, CLOCK_SYNC_DELAY, DOMAIN, FRONTEND_VERSION, URL_BASE
 from .coordinator import K7ConfigEntry, K7Coordinator
-from .profiles import ORIGINAL, ProfileStore
+from .profiles import ProfileStore
 from .program import ProgramStore
 from .protocol import align_day_start, parse_qr_payload, state_rows
 from .websocket import async_register_websocket_commands
@@ -52,7 +52,7 @@ START_ACCLIMATION_SCHEMA = SET_SCHEDULE_SCHEMA.extend(
 STOP_ACCLIMATION_SCHEMA = SYNC_CLOCK_SCHEMA.extend(
     {vol.Optional("keep_current", default=False): cv.boolean}
 )
-CHANNEL_WEIGHTS = vol.Schema({vol.Coerce(int): vol.All(vol.Coerce(int), vol.Range(0, 100))})
+CHANNEL_WEIGHTS = vol.Schema({vol.Any(0, 1, 2, 3, 4, 5, "0", "1", "2", "3", "4", "5"): vol.All(vol.Coerce(int), vol.Range(0, 100))})
 SET_MOONLIGHT_SCHEMA = SYNC_CLOCK_SCHEMA.extend(
     {
         vol.Required("enabled"): cv.boolean,
@@ -104,7 +104,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         else:
             return None
         if call.data.get("align_day_start") and (start := coordinator.day_start_pref()) is not None:
-            schedule = align_day_start(schedule, start)
+            try:
+                schedule = align_day_start(schedule, start)
+            except ValueError as err:
+                raise ServiceValidationError(str(err)) from err
         return call.data.get("manual", manual), schedule
 
     async def set_schedule(call: ServiceCall) -> None:
@@ -182,10 +185,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
     entry.runtime_data = coordinator
 
     profiles: ProfileStore = hass.data[DOMAIN]["profiles"]
-    if ORIGINAL not in profiles.profiles:
-        state = coordinator.data
-        await profiles.async_save(ORIGINAL, state.manual, state_rows(state))
-        _LOGGER.info("Saved the lamp's current schedule as profile %r", ORIGINAL)
+    state = coordinator.data
+    await profiles.async_capture_original(entry.entry_id, entry.title, state.manual, state_rows(state))
+    program: ProgramStore = hass.data[DOMAIN]["program"]
+    if error := program.errors.get(entry.entry_id):
+        coordinator._notify("program", f"Invalid saved program paused: {error}. The original data was preserved in storage; configure the program again to resume.")
 
     async def _daily_sync(_now) -> None:
         try:
@@ -197,24 +201,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
         try:
             await coordinator.async_rebuild()
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Daily schedule rebuild failed (will retry next run): %s", err)
+            _LOGGER.warning("Daily schedule rebuild failed (retry within the dark window): %s", err)
 
     async def _tick(now: datetime) -> None:
-        """Every 5 min: rebuild at the lamp's rebuild time, sync its clock a little later."""
-        h, m = coordinator.rebuild_time()
+        """Retry pending plans every five minutes; the coordinator enforces the window."""
+        await _acclimation_step()
+        h, m = coordinator.rebuild_time() or (3, 30)
         rebuild = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if (now.hour, now.minute) == (h, m):
-            await _acclimation_step()
-        elif now.replace(second=0, microsecond=0) == rebuild + CLOCK_SYNC_DELAY:
+        if now.replace(second=0, microsecond=0) == rebuild + CLOCK_SYNC_DELAY:
             await _daily_sync(now)
 
     entry.async_on_unload(
         async_track_time_change(hass, _tick, minute=list(range(0, 60, 5)), second=0)
     )
-    _LOGGER.info("%s: daily plan at %02d:%02d", entry.title, *coordinator.rebuild_time())
+    _LOGGER.info("%s: daily plan time %s", entry.title, coordinator.rebuild_time() or "no safe dark interval")
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    # Catch up if HA was down when a daily rebuild was due.
+    # Catch up only if an unapplied plan is still inside its safe write window.
     entry.async_create_background_task(hass, _acclimation_step(), f"{DOMAIN} rebuild catch-up")
     return True
 

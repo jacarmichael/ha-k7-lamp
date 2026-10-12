@@ -56,5 +56,6 @@ def test_rebuild_time_before_lights_on(start, expected):
 
 def test_rebuild_time_short_dark_period_and_never_dark():
     one_dark_hour = hourly({h: [1] * 6 for h in range(24) if h != 10})
-    assert rebuild_time(one_dark_hour) == (10, 0)
-    assert rebuild_time(hourly({h: [1] * 6 for h in range(24)})) == (3, 30)
+    # A single zero point has no dark interval between two zero endpoints.
+    assert rebuild_time(one_dark_hour) is None
+    assert rebuild_time(hourly({h: [1] * 6 for h in range(24)})) is None

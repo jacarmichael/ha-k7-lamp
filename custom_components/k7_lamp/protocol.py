@@ -1,4 +1,4 @@
-"""Read-only TCP client for Noo-Psyche K7 lamps (no Home Assistant imports)."""
+"""TCP commands and lossless schedules for Noo-Psyche K7 lamps."""
 from __future__ import annotations
 
 import asyncio
@@ -25,7 +25,9 @@ class K7State:
 
     def scheduled_levels(self, minute_of_day: int) -> list[int]:
         """Linearly interpolate the schedule at a minute of the day (wraps midnight)."""
-        pts = self.schedule
+        # The app uses all-zero midnight rows as disabled slots. Duplicate
+        # active times use the last value for interpolation, but remain on wire.
+        pts = sorted({m: lv for m, lv in self.schedule if m or any(lv)}.items())
         if not pts:
             return [0] * len(CHANNELS)
         if len(pts) == 1:
@@ -62,13 +64,13 @@ def _parse_frame(frame: bytes) -> K7State | None:
         return None
     if any(v > 100 for v in manual):
         return None
-    by_time: dict[int, list[int]] = {}
+    points: list[tuple[int, list[int]]] = []
     for _ in range(count):
         h, m, *levels = frame[pos:pos + 8]
         pos += 8
         if h > 23 or m > 59 or any(v > 100 for v in levels):
             return None
-        by_time[h * 60 + m] = levels
+        points.append((h * 60 + m, levels))
     mode = frame[pos]
     pos += 1
     if mode > 1:
@@ -81,7 +83,7 @@ def _parse_frame(frame: bytes) -> K7State | None:
         name=name,
         auto=mode == 1,
         manual=manual,
-        schedule=sorted(by_time.items()),
+        schedule=sorted(points, key=lambda p: p[0]),
         raw=frame[:end + 1],
     )
 
@@ -131,8 +133,7 @@ async def read_all(host: str, port: int, timeout: float = 6.0) -> K7State:
     raise K7Error(f"unrecognised reply ({len(data)} bytes): {data.hex(' ')}")
 
 
-# --- Write commands (not used by the integration yet; exercised by tools/k7_test.py) ---
-# ALL_SET (10 07) is deliberately not implemented: it blocks the lamp and rewrites flash.
+# --- Write commands; ALL_SET blocks the lamp and rewrites flash ---
 
 CMD_SYNC_TIME = (0x10, 0x03)
 CMD_CHANGE_MODE = (0x10, 0x04)
@@ -145,7 +146,7 @@ def build_frame(cmd: tuple[int, int], data: bytes = b"") -> bytes:
 
 
 def _levels(levels: list[int]) -> bytes:
-    if len(levels) != len(CHANNELS) or any(not 0 <= v <= 100 for v in levels):
+    if len(levels) != len(CHANNELS) or any(type(v) is not int or not 0 <= v <= 100 for v in levels):
         raise ValueError(f"need {len(CHANNELS)} levels in 0-100, got {levels}")
     return bytes(levels)
 
@@ -218,21 +219,29 @@ def validate_schedule(manual: list[int], schedule: list[Row]) -> None:
     for i, row in enumerate(schedule):
         if len(row) != 2 + len(CHANNELS):
             raise ValueError(f"row {i} needs {2 + len(CHANNELS)} values")
+        if any(type(v) is not int for v in row):
+            raise ValueError(f"row {i} must contain integers")
         h, m, *levels = row
         if not (0 <= h <= 23 and 0 <= m <= 59) or any(not 0 <= v <= 100 for v in levels):
             raise ValueError(f"row {i} out of range: {row}")
 
 
 def state_rows(state: K7State) -> list[Row]:
-    """The lamp's schedule as 24 [h, m, c0..c5] rows (padded with hourly zeros if short)."""
+    """Preserve every slot; short replies are padded with disabled app slots."""
     rows = [[m // 60, m % 60, *levels] for m, levels in state.schedule]
-    have = {(r[0], r[1]) for r in rows}
-    for h in range(SLOTS):
-        if len(rows) >= SLOTS:
-            break
-        if (h, 0) not in have:
-            rows.append([h, 0] + [0] * len(CHANNELS))
-    return sorted(rows)[:SLOTS]
+    rows.extend([[0] * 8 for _ in range(max(0, SLOTS - len(rows)))])
+    return sort_rows(rows)
+
+
+def sort_rows(schedule: list[Row]) -> list[Row]:
+    """Stable chronological order, including the order of duplicate times."""
+    return sorted((list(r) for r in schedule), key=lambda r: (r[0], r[1]))
+
+
+def active_rows(schedule: list[Row]) -> list[Row]:
+    """Calculation view; never use this to reconstruct the raw protocol slots."""
+    by_time = {r[0] * 60 + r[1]: r for r in schedule if any(r)}
+    return [list(r) for _, r in sorted(by_time.items())]
 
 
 def build_all_set(
@@ -279,44 +288,56 @@ def parse_qr_payload(text: str) -> tuple[list[int], list[Row]]:
         raise ValueError("QR payload is not hexadecimal") from err
     schedule = [list(raw[i:i + 8]) for i in range(0, len(raw), 8)]
     validate_schedule(manual, schedule)
-    return manual, sorted(schedule)
+    return manual, sort_rows(schedule)
 
 
-# --- Photoperiod helpers (hourly schedules) ---
+# --- Photoperiod helpers ---
 
 def _lit(row: Row) -> bool:
     return any(v > 0 for v in row[2:])
 
 
-def day_start(schedule: list[Row]) -> int | None:
+def day_start(schedule: list[Row]) -> float | None:
     """Hour of the first lit slot that follows a dark slot (None if never dark or never lit)."""
-    rows = sorted(schedule, key=lambda r: (r[0], r[1]))
+    rows = active_rows(schedule)
     for i, row in enumerate(rows):
         if _lit(row) and not _lit(rows[i - 1]):
-            return row[0]
+            return row[0] + row[1] / 60
     return None
 
 
-def photoperiod(schedule: list[Row]) -> tuple[int, int] | None:
+def photoperiod(schedule: list[Row]) -> tuple[float, float] | None:
     """(start_hour, end_hour) where end is the first dark slot after the start."""
     start = day_start(schedule)
     if start is None:
         return None
-    rows = sorted(schedule, key=lambda r: (r[0], r[1]))
-    idx = next(i for i, r in enumerate(rows) if r[0] == start)
+    rows = active_rows(schedule)
+    idx = next(i for i, r in enumerate(rows) if _lit(r) and not _lit(rows[i - 1]))
     for k in range(1, len(rows) + 1):
         row = rows[(idx + k) % len(rows)]
         if not _lit(row):
-            return start, row[0]
+            return start, row[0] + row[1] / 60
     return None
 
 
-def shift_rows(schedule: list[Row], hours: int) -> list[Row]:
-    """Move the levels `hours` later (wrapping); slot times stay hh:mm."""
-    rows = sorted(schedule, key=lambda r: (r[0], r[1]))
-    n = len(rows)
-    hours %= n
-    return [[rows[i][0], rows[i][1], *rows[(i - hours) % n][2:]] for i in range(n)]
+def shift_rows(schedule: list[Row], hours: float) -> list[Row]:
+    """Move active timestamps by real hours; retain disabled slots as padding."""
+    rows = []
+    delta = round(hours * 60)
+    for row in schedule:
+        if not any(row):
+            rows.append(list(row))
+            continue
+        minute = (row[0] * 60 + row[1] + delta) % 1440
+        rows.append([minute // 60, minute % 60, *row[2:]])
+    # A dark point shifted to midnight becomes disabled in the app's format.
+    # It is only safe to omit when both neighbours are dark as well.
+    active = active_rows(schedule)
+    for i, row in enumerate(active):
+        if (row[0] * 60 + row[1] + delta) % 1440 == 0 and not _lit(row):
+            if _lit(active[i - 1]) or _lit(active[(i + 1) % len(active)]):
+                raise ValueError("Cannot shift a dark boundary to 00:00: K7 treats it as a disabled slot")
+    return sort_rows(rows)
 
 
 def align_day_start(schedule: list[Row], start_hour: int) -> list[Row]:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
 
 import voluptuous as vol
 
@@ -15,6 +16,7 @@ from .protocol import CHANNELS, parse_qr_payload, state_rows, to_qr_payload
 
 LEVELS = vol.All([vol.All(vol.Coerce(int), vol.Range(0, 100))], vol.Length(6, 6))
 ROWS = vol.All([vol.All([vol.Coerce(int)], vol.Length(8, 8))], vol.Length(24, 24))
+_LOGGER = logging.getLogger(__name__)
 
 
 def _profiles(hass: HomeAssistant) -> ProfileStore:
@@ -27,14 +29,16 @@ def _program_info(coordinator) -> dict[str, Any]:
     manual, schedule = coordinator.target()
     effective = coordinator.effective()
     period = coordinator.photoperiod()
+    rebuild = coordinator.rebuild_time()
     return {
         "program": coordinator.program() is not None,
+        "pending": coordinator.plan_pending(),
         "target": {"manual": manual, "schedule": schedule},
         "effective": {"manual": effective[0], "schedule": effective[1]} if effective else None,
         "moon": coordinator.moon_info(),
         "day_start": coordinator.day_start_pref(),
         "photoperiod": list(period) if period else None,
-        "rebuild_time": "%02d:%02d" % coordinator.rebuild_time(),
+        "rebuild_time": "%02d:%02d" % rebuild if rebuild else None,
     }
 
 
@@ -43,6 +47,12 @@ def _lamps(hass: HomeAssistant) -> list[dict[str, Any]]:
     for entry in hass.config_entries.async_loaded_entries(DOMAIN):
         coordinator = entry.runtime_data
         state = coordinator.data
+        try:
+            info = {"acclimation": coordinator.acclimation_info(), **_program_info(coordinator)}
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as err:
+            _LOGGER.warning("Cannot describe program for %s: %s", entry.entry_id, err)
+            info = {"program_error": "Invalid program; check the integration notification or logs",
+                    "acclimation": None, "program": False}
         lamps.append(
             {
                 "entry_id": entry.entry_id,
@@ -51,8 +61,8 @@ def _lamps(hass: HomeAssistant) -> list[dict[str, Any]]:
                 "auto": state.auto if state else None,
                 "manual": state.manual if state else None,
                 "schedule": state_rows(state) if state else None,
-                "acclimation": coordinator.acclimation_info(),
-                **_program_info(coordinator),
+                "original": _profiles(hass).originals.get(entry.entry_id),
+                **info,
             }
         )
     return lamps
@@ -233,7 +243,7 @@ async def ws_stop_acclimation(hass, connection, msg):
         vol.Required("enabled"): bool,
         vol.Optional("max_level"): vol.All(vol.Coerce(int), vol.Range(1, 50)),
         vol.Optional("follow_moon"): bool,
-        vol.Optional("channels"): {vol.Coerce(str): vol.All(vol.Coerce(int), vol.Range(0, 100))},
+        vol.Optional("channels"): {vol.Any("0", "1", "2", "3", "4", "5"): vol.All(vol.Coerce(int), vol.Range(0, 100))},
     }
 )
 @websocket_api.async_response

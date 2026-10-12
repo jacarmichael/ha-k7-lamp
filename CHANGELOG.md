@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.2
+
+- Preserve duplicate schedule slots and app padding through reads, QR exchange, profiles and writes; exclude disabled slots from interpolation and moonlight.
+- Validate moon channel indices before storage and quarantine previously invalid programs without blocking other lamps.
+- Restore Home Assistant 2025.2 compatibility and reject K7 Mini model prefixes.
+- Serialize complete program changes; confirm writes by read-back and persist applied cycle/percentage.
+- Respect manual mode during automatic updates, avoid daytime restart writes, and retry failures within an actual dark interval of at most 30 minutes.
+- Shift real timestamps (including minutes), select individual editor slots, and refuse unrepresentable midnight dark boundaries.
+- Keep original backups per lamp and display actual read-back schedules and pending updates.
+- Fix moonlight form submission and stop QR camera streams on panel changes, including delayed permission responses.
+- Add schedule, Home Assistant integration and frontend regression coverage to CI.
+
 ## 0.5.1
 
 - Pass Home Assistant's hassfest validation (manifest key order, no braces in action descriptions).

@@ -34,9 +34,13 @@ Local control of a **Noo-Psyche K7 Pro** reef light from Home Assistant, over yo
 
 The lamp keeps running its own 24-point schedule in **auto** mode. Home Assistant edits that schedule and keeps the lamp's clock right:
 
-- Once a day, while the tank is still dark shortly before lights-on, Home Assistant writes the day's plan to the lamp. The plan is your schedule, scaled for acclimation if one is running, plus tonight's moon.
+- Once a day, during a dark interval in your target schedule shortly before lights-on, Home Assistant writes the day's plan to the lamp. The plan is your schedule, scaled for acclimation if one is running, plus tonight's moon. Moonlight may still be on during that target dark interval.
 - If Home Assistant is down, the lamp carries on with the last plan it received. Your tank never depends on HA being up.
 - A full schedule write makes the lamp pause for a few seconds and resets its output. That's why it happens once a day in the dark, and otherwise only when you press **Apply**.
+
+Automatic updates respect **manual mode** and preserve the lamp's current manual levels. Explicit Apply, acclimation and moonlight changes can switch the lamp to auto mode. The integration confirms the schedule by reading it back before recording the update as applied.
+
+Failed automatic updates retry every five minutes inside a window of at most 30 minutes. A restart resumes a pending update only inside that window; it does not rewrite an already confirmed plan or catch up during daylight. If the window is missed, a notification explains the pending update. If your target never has a dark interval between two zero points, automatic updates pause until you add one or apply changes explicitly. A single zero point between ramps is not a dark interval.
 
 ## Requirements
 
@@ -59,7 +63,9 @@ Copy `custom_components/k7_lamp` into your Home Assistant `config/custom_compone
 1. Go to **Settings → Devices & services → Add integration → Noo-Psyche K7 Lamp**.
 2. Enter the lamp's IP address. The port defaults to 8266.
 
-Setup only reads from the lamp. The integration saves the lamp's current schedule as the profile **"Original (from lamp)"**.
+Initial setup reads the lamp and saves its current schedule as an immutable **Original (lamp name)** backup for that lamp. The card lists this separately from shared profiles and loads it with its original times. Older shared **Original (from lamp)** profiles are retained and labelled **Original (legacy, lamp unknown)** because the old format did not record which lamp they belonged to. On upgrading, each new per-lamp backup captures the schedule seen at the first setup with this version.
+
+Invalid saved programs are paused and preserved in `.storage/k7_lamp.program` under `invalid_programs`; a notification asks you to configure the program again. Other lamps remain usable.
 
 ### The card
 The card registers itself as a dashboard resource. Add it to any dashboard:
@@ -75,7 +81,7 @@ If your dashboards are in **YAML mode**, add the resource yourself:
 ```yaml
 lovelace:
   resources:
-    - url: /k7_lamp/k7-schedule-card.js?v=0.5.0
+    - url: /k7_lamp/k7-schedule-card.js?v=0.5.2
       type: module
 ```
 
@@ -84,7 +90,7 @@ lovelace:
 - **Edit and Apply:** change the curve, then press **Apply to lamp**. If you're using acclimation or moonlight, the button says **Update target**.
 - **Load…:** choose a saved profile, a preset or the current schedule. Loaded schedules are shifted to your *Day starts at* hour unless you untick "Align loaded profiles".
 - **Import QR / Show QR:** exchange schedules with the Noo-Psyche app and other reefers.
-- **Acclimate…:** set a start % and a number of days. A banner shows the current day and %, with a Stop button. When you stop, you can keep the current level or go straight to the full schedule.
+- **Acclimate…:** set a start % and a number of days. The banner distinguishes today's planned percentage from the last confirmed percentage; the intensity sensor reports the confirmed value (unknown until the first confirmation). When you stop, you can keep the confirmed level or go straight to the full schedule.
 - **Moonlight…:**
   - **Level at full moon:** 15% by default.
   - **Channels:** Royal Blue 100% and Cyan 70% by default.
@@ -98,6 +104,19 @@ lovelace:
 - Light levels are whole percentages, so a thin crescent moon rounds to 0–1%.
 - Master/slave lamp groups have not been tested. The integration controls the lamp you configure.
 - "Output" sensors are estimates calculated from the schedule. The lamp doesn't report what it's actually emitting.
+- QR schedules retain all 24 slots, including duplicate times and disabled all-zero midnight slots. Unused slots do not participate in interpolation or moonlight. Day-start alignment shifts actual timestamps, including minutes. The K7 format cannot represent an active zero-output boundary at exactly 00:00; a shift that would create one is refused instead of changing the curve silently. Choose a different day start in that case.
+
+## Development checks
+
+Use Python 3.13 and Node.js 18 or newer:
+
+```sh
+python -m pip install pytest homeassistant==2025.2.0
+python -m pytest -q
+node --test tests/test_frontend.cjs
+```
+
+The HA tests use real Home Assistant classes, platform setup and storage with a simulated lamp. The frontend tests use the original card methods with DOM/media fakes. No test connects to aquarium hardware.
 
 ## Troubleshooting
 
