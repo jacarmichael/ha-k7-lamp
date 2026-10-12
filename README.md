@@ -40,7 +40,9 @@ The lamp keeps running its own 24-point schedule in **auto** mode. Home Assistan
 
 Automatic updates respect **manual mode** and preserve the lamp's current manual levels. Explicit Apply, acclimation and moonlight changes can switch the lamp to auto mode. The integration confirms the schedule by reading it back before recording the update as applied.
 
-Failed automatic updates retry every five minutes inside a window of at most 30 minutes. A restart resumes a pending update only inside that window; it does not rewrite an already confirmed plan or catch up during daylight. If the window is missed, a notification explains the pending update. If your target never has a dark interval between two zero points, automatic updates pause until you add one or apply changes explicitly. A single zero point between ramps is not a dark interval.
+Failed automatic updates retry every five minutes inside a window of at most 30 minutes. A write the lamp has acknowledged is never repeated automatically in the same night, even if reading it back doesn't confirm it; press **Apply** to write again. A restart resumes a pending update only inside that window; it does not rewrite an already confirmed plan or catch up during daylight. If the window is missed, a notification explains the pending update. If your target never has a dark interval between two zero points, automatic updates pause until you add one or apply changes explicitly. A single zero point between ramps is not a dark interval.
+
+Home Assistant reads the lamp every five minutes and right after each write. In between, the output sensors follow the schedule minute by minute. A single failed read is ignored; after two in a row the lamp shows as unavailable.
 
 ## Requirements
 
@@ -65,7 +67,7 @@ Copy `custom_components/k7_lamp` into your Home Assistant `config/custom_compone
 
 Initial setup reads the lamp and saves its current schedule as an immutable **Original (lamp name)** backup for that lamp. The card lists this separately from shared profiles and loads it with its original times. Older shared **Original (from lamp)** profiles are retained and labelled **Original (legacy, lamp unknown)** because the old format did not record which lamp they belonged to. On upgrading, each new per-lamp backup captures the schedule seen at the first setup with this version.
 
-Invalid saved programs are paused and preserved in `.storage/k7_lamp.program` under `invalid_programs`; a notification asks you to configure the program again. Other lamps remain usable.
+Invalid saved programs are paused and preserved in `.storage/k7_lamp.program` under `invalid_programs`, and a repair issue (**Settings → Repairs**) explains why. Starting acclimation or moonlight again replaces the old program and resolves the issue. Other lamps remain usable.
 
 ### The card
 The card registers itself as a dashboard resource. Add it to any dashboard:
@@ -111,18 +113,22 @@ lovelace:
 Use Python 3.13 and Node.js 18 or newer:
 
 ```sh
-python -m pip install pytest homeassistant==2025.2.0
+python -m pip install pytest ruff homeassistant==2025.2.0
+ruff check .
 python -m pytest -q
 node --test tests/test_frontend.cjs
 ```
 
 The HA tests use real Home Assistant classes, platform setup and storage with a simulated lamp. The frontend tests use the original card methods with DOM/media fakes. No test connects to aquarium hardware.
 
+The daily plan rules live in `planner.py` without Home Assistant imports and are tested in `tests/test_planner.py`. The card repeats a few schedule calculations from `protocol.py`; both copies are tested against `tests/schedule_vectors.json`.
+
 ## Troubleshooting
 
 - **Cannot connect:** check the IP, that the lamp is in LAN mode, and your firewall/VLAN rules for TCP 8266 from the HA host.
 - **Card doesn't show:** hard-refresh the browser. In the companion app, use Settings → Companion app → Debugging → Reset frontend cache.
 - **Testing by hand:** `tools/k7_test.py --host <lamp-ip> status` reads the lamp from any computer with Python 3.9+. Other commands write to the lamp, so only run them while you can watch the tank.
+- **Checking firmware assumptions:** `allset-same` writes the lamp's own schedule back and lists every slot it reads back differently; the integration needs these to match. `midnight-test` shows whether the lamp skips all-zero 00:00 slots, as the app and the integration assume, and then restores your schedule. Each writes flash, so run them once, not routinely.
 
 ## Credits
 

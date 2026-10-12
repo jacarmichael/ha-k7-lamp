@@ -11,6 +11,13 @@
 - Keep original backups per lamp and display actual read-back schedules and pending updates.
 - Fix moonlight form submission and stop QR camera streams on panel changes, including delayed permission responses.
 - Add schedule, Home Assistant integration and frontend regression coverage to CI.
+- Write at most one acknowledged ALL_SET per night automatically, even when the read-back differs; Apply can still write.
+- Read the lamp every 5 minutes instead of every 30 seconds; output sensors update every minute; one failed read is tolerated.
+- Migrate stored programs (storage 1.2) so upgrading neither rewrites the lamp nor reports a pending plan.
+- Report invalid saved programs as a repair issue, cleared when a new program replaces them.
+- Move the plan rules into `planner.py` and the program into a validated `Program` model, both without Home Assistant imports.
+- Test the card's copy of the schedule maths against the same vectors as `protocol.py`; lint with ruff.
+- `tools/k7_test.py`: list read-back differences, `midnight-test`, `restore` and `demo`.
 
 ## 0.5.1
 
