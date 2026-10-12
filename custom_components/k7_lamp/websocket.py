@@ -1,8 +1,8 @@
 """WebSocket API used by the schedule editor card."""
 from __future__ import annotations
 
-from typing import Any
 import logging
+from typing import Any
 
 import voluptuous as vol
 
@@ -16,6 +16,7 @@ from .protocol import CHANNELS, parse_qr_payload, state_rows, to_qr_payload
 
 LEVELS = vol.All([vol.All(vol.Coerce(int), vol.Range(0, 100))], vol.Length(6, 6))
 ROWS = vol.All([vol.All([vol.Coerce(int)], vol.Length(8, 8))], vol.Length(24, 24))
+MOON_CHANNELS = {vol.Any("0", "1", "2", "3", "4", "5"): vol.All(vol.Coerce(int), vol.Range(0, 100))}
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -27,14 +28,12 @@ def _program_info(coordinator) -> dict[str, Any]:
     if coordinator.data is None:
         return {}
     manual, schedule = coordinator.target()
-    effective = coordinator.effective()
     period = coordinator.photoperiod()
     rebuild = coordinator.rebuild_time()
     return {
         "program": coordinator.program() is not None,
         "pending": coordinator.plan_pending(),
         "target": {"manual": manual, "schedule": schedule},
-        "effective": {"manual": effective[0], "schedule": effective[1]} if effective else None,
         "moon": coordinator.moon_info(),
         "day_start": coordinator.day_start_pref(),
         "photoperiod": list(period) if period else None,
@@ -51,7 +50,7 @@ def _lamps(hass: HomeAssistant) -> list[dict[str, Any]]:
             info = {"acclimation": coordinator.acclimation_info(), **_program_info(coordinator)}
         except (ValueError, TypeError, KeyError, IndexError, AttributeError) as err:
             _LOGGER.warning("Cannot describe program for %s: %s", entry.entry_id, err)
-            info = {"program_error": "Invalid program; check the integration notification or logs",
+            info = {"program_error": "Invalid program; check the logs",
                     "acclimation": None, "program": False}
         lamps.append(
             {
@@ -243,7 +242,7 @@ async def ws_stop_acclimation(hass, connection, msg):
         vol.Required("enabled"): bool,
         vol.Optional("max_level"): vol.All(vol.Coerce(int), vol.Range(1, 50)),
         vol.Optional("follow_moon"): bool,
-        vol.Optional("channels"): {vol.Any("0", "1", "2", "3", "4", "5"): vol.All(vol.Coerce(int), vol.Range(0, 100))},
+        vol.Optional("channels"): MOON_CHANNELS,
     }
 )
 @websocket_api.async_response

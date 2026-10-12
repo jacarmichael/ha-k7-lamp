@@ -1,55 +1,58 @@
-"""Per-lamp program: the target schedule plus acclimation and moonlight settings.
-
-When a lamp has a program, its target schedule lives in HA and the lamp gets a
-daily-built "effective" schedule (target -> acclimation scaling -> moon overlay).
-"""
+"""Per-lamp programs in HA storage (.storage/k7_lamp.program); the model is in model.py."""
 from __future__ import annotations
 
 import asyncio
 from copy import deepcopy
-from datetime import date, datetime
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, STORAGE_VERSION
-from .effective import validate_moon
-from .protocol import validate_schedule
+from .model import Program
+from .planner import carried_over
+
+# 1.2: applied/pending/written_cycle bookkeeping for the daily plan.
+STORAGE_MINOR_VERSION = 2
+LOAD_ERRORS = (ValueError, TypeError, KeyError, AttributeError)
 
 
-def validate_program(program: dict[str, Any]) -> dict[str, Any]:
-    """Check persisted input before it can drive a lamp or the dashboard."""
-    prog = deepcopy(program)
-    validate_schedule(prog["target_manual"], prog["target_schedule"])
-    if (moon := prog.get("moon")) is not None:
-        prog["moon"] = validate_moon(moon)
-    if acc := prog.get("acclimation"):
-        if type(acc["start_pct"]) is not int or not 1 <= acc["start_pct"] <= 99:
-            raise ValueError("Invalid acclimation start percent")
-        if type(acc["days"]) is not int or not 1 <= acc["days"] <= 120:
-            raise ValueError("Invalid acclimation duration")
-        date.fromisoformat(acc["started"])
-    if applied := prog.get("applied"):
-        validate_schedule(applied["manual"], applied["schedule"])
-        if type(applied["percent"]) is not int or not 1 <= applied["percent"] <= 100:
-            raise ValueError("Invalid applied percent")
-        for key in ("at", "cycle"):
-            if applied.get(key) is not None and datetime.fromisoformat(applied[key]).tzinfo is None:
-                raise ValueError("Applied plan time must include a timezone")
-    return prog
+def _carry_over(raw: dict[str, Any]) -> None:
+    """Older versions wrote their daily plan themselves; don't rewrite or warn after upgrading."""
+    if "applied" in raw:
+        return
+    try:
+        applied = carried_over(Program.from_dict(raw), dt_util.now())
+    except LOAD_ERRORS:
+        return  # quarantined on load
+    if applied is not None:
+        raw["applied"] = {"cycle": applied.cycle, "percent": applied.percent, "at": None}
+
+
+class _ProgramStorage(Store[dict[str, Any]]):
+    async def _async_migrate_func(self, old_major_version, old_minor_version, old_data):
+        if old_major_version != STORAGE_VERSION:
+            raise NotImplementedError
+        if old_minor_version < 2:
+            for raw in old_data.get("programs", {}).values():
+                _carry_over(raw)
+        return old_data
 
 
 class ProgramStore:
-    """.storage/k7_lamp.program: {"programs": {entry_id: {...}}, "prefs": {entry_id: {...}}}"""
+    """{"programs": {entry_id: program}, "prefs": {entry_id: {...}},
+    "invalid_programs": {entry_id: {"program": raw, "error": message}}}"""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
-        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, f"{DOMAIN}.program")
-        self.programs: dict[str, dict[str, Any]] = {}
+        self._store = _ProgramStorage(
+            hass, STORAGE_VERSION, f"{DOMAIN}.program", minor_version=STORAGE_MINOR_VERSION
+        )
+        self.programs: dict[str, Program] = {}
         self.prefs: dict[str, dict[str, Any]] = {}
-        self.invalid_programs: dict[str, Any] = {}
-        self.errors: dict[str, str] = {}
+        # Programs that failed validation: kept until a new program replaces them.
+        self.invalid_programs: dict[str, dict[str, Any]] = {}
         self._save_lock = asyncio.Lock()
 
     async def async_load(self) -> None:
@@ -59,22 +62,20 @@ class ProgramStore:
             await self._store.async_save(data)
         self.prefs = data.get("prefs", {})
         self.invalid_programs = data.get("invalid_programs", {})
-        for entry_id, program in data.get("programs", {}).items():
+        quarantined = False
+        for entry_id, raw in data.get("programs", {}).items():
             try:
-                self.programs[entry_id] = validate_program(program)
-            except (ValueError, TypeError, KeyError, AttributeError) as err:
-                self.invalid_programs[entry_id] = program
-                self.errors[entry_id] = str(err)
-        for entry_id in self.invalid_programs:
-            if entry_id not in self.programs:
-                self.errors.setdefault(entry_id, "Previously invalid program remains paused")
-        if self.errors:
+                self.programs[entry_id] = Program.from_dict(raw)
+            except LOAD_ERRORS as err:
+                self.invalid_programs[entry_id] = {"program": raw, "error": str(err)}
+                quarantined = True
+        if quarantined:
             await self._save()
 
     async def _migrate(self) -> dict[str, dict[str, Any]]:
         """Bring over acclimation runs saved by v0.3.0."""
         old = await Store(self._hass, STORAGE_VERSION, f"{DOMAIN}.acclimation").async_load() or {}
-        return {
+        programs = {
             entry_id: {
                 "target_manual": run["target_manual"],
                 "target_schedule": run["target_schedule"],
@@ -83,20 +84,29 @@ class ProgramStore:
             }
             for entry_id, run in old.get("runs", {}).items()
         }
+        for raw in programs.values():
+            _carry_over(raw)
+        return programs
 
     async def _save(self) -> None:
         async with self._save_lock:
-            await self._store.async_save(deepcopy({
-                "programs": self.programs, "prefs": self.prefs,
-                "invalid_programs": self.invalid_programs,
-            }))
+            await self._store.async_save({
+                "programs": {k: p.to_dict() for k, p in self.programs.items()},
+                "prefs": deepcopy(self.prefs),
+                "invalid_programs": deepcopy(self.invalid_programs),
+            })
 
-    def get(self, entry_id: str) -> dict[str, Any] | None:
+    def get(self, entry_id: str) -> Program | None:
         return self.programs.get(entry_id)
 
-    async def async_set(self, entry_id: str, program: dict[str, Any]) -> None:
-        self.programs[entry_id] = validate_program(program)
-        self.errors.pop(entry_id, None)
+    def invalid(self, entry_id: str) -> str | None:
+        """Why a stored program was set aside, if it was."""
+        bad = self.invalid_programs.get(entry_id)
+        return bad["error"] if bad else None
+
+    async def async_set(self, entry_id: str, program: Program) -> None:
+        self.programs[entry_id] = program
+        self.invalid_programs.pop(entry_id, None)  # superseded by the new program
         await self._save()
 
     async def async_clear(self, entry_id: str) -> None:

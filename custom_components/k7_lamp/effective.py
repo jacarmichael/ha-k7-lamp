@@ -5,40 +5,11 @@ effective = target -> acclimation scaling -> moon overlay, for the next 24 hours
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
 
 from .acclimation import _round, percent_for, scale
+from .model import Program
 from .moon import moon_level
 from .protocol import Row, active_rows
-
-DEFAULT_MOON = {
-    "enabled": True,
-    "max_level": 15,
-    "channels": {"1": 100, "4": 70},  # Royal Blue full, Cyan at 70% (as bitbarista)
-    "follow_moon": True,
-}
-
-
-def validate_moon(config: dict[str, Any]) -> dict[str, Any]:
-    """Validate before storage AND before indexing a schedule row."""
-    if not isinstance(config, dict):
-        raise ValueError("Moon settings must be an object")
-    cfg = {**DEFAULT_MOON, **config}
-    if type(cfg["enabled"]) is not bool or type(cfg["follow_moon"]) is not bool:
-        raise ValueError("Moon enabled/follow_moon must be booleans")
-    if type(cfg["max_level"]) is not int or not 1 <= cfg["max_level"] <= 50:
-        raise ValueError("Maximum moon level must be 1-50%")
-    if not isinstance(cfg["channels"], dict):
-        raise ValueError("Moon channels must be an object")
-    weights = {}
-    for key, value in cfg["channels"].items():
-        if str(key) not in {"0", "1", "2", "3", "4", "5"}:
-            raise ValueError("Moon channel must be an integer from 0 to 5")
-        if type(value) is not int or not 0 <= value <= 100:
-            raise ValueError("Moon channel weight must be 0-100%")
-        if value:
-            weights[str(key)] = value
-    return {**cfg, "channels": weights}
 
 
 def rebuild_window(schedule: list[Row]) -> tuple[int, int] | None:
@@ -88,11 +59,11 @@ def plan_window(schedule: list[Row], now: datetime) -> tuple[datetime, datetime]
     return start, start + timedelta(minutes=duration)
 
 
-def acclimation_percent(program: dict[str, Any], today: date) -> int | None:
-    acc = program.get("acclimation")
-    if not acc:
+def acclimation_percent(program: Program, today: date) -> int | None:
+    acc = program.acclimation
+    if acc is None:
         return None
-    return percent_for(acc["start_pct"], acc["days"], date.fromisoformat(acc["started"]), today)
+    return percent_for(acc.start_pct, acc.days, acc.started, today)
 
 
 def next_slot_time(now: datetime, hour: int, minute: int) -> datetime:
@@ -102,23 +73,22 @@ def next_slot_time(now: datetime, hour: int, minute: int) -> datetime:
 
 
 def build_effective(
-    program: dict[str, Any], now: datetime, lat: float, lon: float
+    program: Program, now: datetime, lat: float, lon: float
 ) -> tuple[list[int], list[Row]]:
     """What the lamp should run for the next 24 h. `now` must be timezone-aware local time."""
-    manual = list(program["target_manual"])
-    schedule = [list(r) for r in program["target_schedule"]]
+    manual = list(program.target_manual)
+    schedule = [list(r) for r in program.target_schedule]
     pct = acclimation_percent(program, now.date())
     if pct is not None and pct < 100:
         manual, schedule = scale(manual, schedule, pct)
-    moon = program.get("moon")
-    if moon and moon.get("enabled"):
-        moon = validate_moon(moon)
+    if program.moon_enabled:
+        moon = program.moon
         weights = {int(ch): w for ch, w in moon["channels"].items()}
         for row in schedule:
             if not any(row):
                 continue  # Keep the app's disabled midnight slots disabled.
             when = next_slot_time(now, row[0], row[1]).astimezone(timezone.utc)
-            level = moon_level(when, lat, lon, moon["max_level"], moon.get("follow_moon", True))
+            level = moon_level(when, lat, lon, moon["max_level"], moon["follow_moon"])
             for ch, weight in weights.items():
                 v = min(100, _round(level * weight / 100))
                 row[2 + ch] = max(row[2 + ch], v)

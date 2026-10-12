@@ -18,6 +18,12 @@
       "unsupported_model": "This lamp looks like a K7 Mini. This integration currently supports the K7 Pro only."
     }
   },
+  "issues": {
+    "invalid_program": {
+      "title": "Saved K7 program set aside for {title}",
+      "description": "The saved acclimation/moonlight program for {title} is invalid and has been paused: {error}. The lamp keeps running its last schedule. Start acclimation or moonlight again to replace the program; the old data stays in `.storage/k7_lamp.program` under `invalid_programs` until then."
+    }
+  },
   "services": {
     "set_schedule": {
       "name": "Set schedule",

@@ -12,6 +12,7 @@ from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.typing import ConfigType
 
@@ -52,7 +53,8 @@ START_ACCLIMATION_SCHEMA = SET_SCHEDULE_SCHEMA.extend(
 STOP_ACCLIMATION_SCHEMA = SYNC_CLOCK_SCHEMA.extend(
     {vol.Optional("keep_current", default=False): cv.boolean}
 )
-CHANNEL_WEIGHTS = vol.Schema({vol.Any(0, 1, 2, 3, 4, 5, "0", "1", "2", "3", "4", "5"): vol.All(vol.Coerce(int), vol.Range(0, 100))})
+CHANNEL_KEY = vol.Any(0, 1, 2, 3, 4, 5, "0", "1", "2", "3", "4", "5")
+CHANNEL_WEIGHTS = vol.Schema({CHANNEL_KEY: vol.All(vol.Coerce(int), vol.Range(0, 100))})
 SET_MOONLIGHT_SCHEMA = SYNC_CLOCK_SCHEMA.extend(
     {
         vol.Required("enabled"): cv.boolean,
@@ -188,8 +190,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
     state = coordinator.data
     await profiles.async_capture_original(entry.entry_id, entry.title, state.manual, state_rows(state))
     program: ProgramStore = hass.data[DOMAIN]["program"]
-    if error := program.errors.get(entry.entry_id):
-        coordinator._notify("program", f"Invalid saved program paused: {error}. The original data was preserved in storage; configure the program again to resume.")
+    if (error := program.invalid(entry.entry_id)) is not None:
+        ir.async_create_issue(
+            hass, DOMAIN, f"invalid_program_{entry.entry_id}",
+            is_fixable=False, severity=ir.IssueSeverity.WARNING,
+            translation_key="invalid_program",
+            translation_placeholders={"title": entry.title, "error": error},
+        )
 
     async def _daily_sync(_now) -> None:
         try:
@@ -197,15 +204,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Daily clock sync failed: %s", err)
 
-    async def _acclimation_step(_now=None) -> None:
+    async def _plan_step(_now=None) -> None:
         try:
             await coordinator.async_rebuild()
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Daily schedule rebuild failed (retry within the dark window): %s", err)
+            _LOGGER.warning("Daily schedule rebuild failed: %s", err)
 
     async def _tick(now: datetime) -> None:
-        """Retry pending plans every five minutes; the coordinator enforces the window."""
-        await _acclimation_step()
+        """Retry pending plans every five minutes; the planner enforces the window."""
+        await _plan_step()
         h, m = coordinator.rebuild_time() or (3, 30)
         rebuild = now.replace(hour=h, minute=m, second=0, microsecond=0)
         if now.replace(second=0, microsecond=0) == rebuild + CLOCK_SYNC_DELAY:
@@ -214,11 +221,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
     entry.async_on_unload(
         async_track_time_change(hass, _tick, minute=list(range(0, 60, 5)), second=0)
     )
-    _LOGGER.info("%s: daily plan time %s", entry.title, coordinator.rebuild_time() or "no safe dark interval")
+    _LOGGER.info(
+        "%s: daily plan time %s", entry.title, coordinator.rebuild_time() or "no safe dark interval"
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     # Catch up only if an unapplied plan is still inside its safe write window.
-    entry.async_create_background_task(hass, _acclimation_step(), f"{DOMAIN} rebuild catch-up")
+    entry.async_create_background_task(hass, _plan_step(), f"{DOMAIN} rebuild catch-up")
     return True
 
 

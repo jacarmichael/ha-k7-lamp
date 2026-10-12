@@ -279,7 +279,7 @@ class K7ScheduleCard extends HTMLElement {
       ${pref != null && cur !== null && cur !== pref ? `<button data-act="align">Shift to ${pad(pref)}:00</button>` : ""}
       <label class="tog"><input type="checkbox" data-act="keeptimes" ${this._keepTimes ? "" : "checked"}>Align loaded profiles</label>
       <span class="grow"></span>
-      ${this._lamp.program ? `<label class="tog"><input type="checkbox" data-act="showeff" ${this._showEff ? "checked" : ""}>Show what the lamp runs</label>` : ""}
+      ${this._lamp.program ? `<label class="tog"><input type="checkbox" data-act="showlamp" ${this._showLamp ? "checked" : ""}>Show what the lamp runs</label>` : ""}
     </div>`;
   }
 
@@ -452,10 +452,10 @@ class K7ScheduleCard extends HTMLElement {
           pointRadius: 4,
           pointHitRadius: 12,
           tension: 0,
-        })).concat(this._showEff && this._lamp.effective ? this._channels.map((c, ch) => ({
+        })).concat(this._showLamp && this._lamp.schedule ? this._channels.map((c, ch) => ({
           label: `${c} (lamp)`,
           hidden: !this._visible[ch],
-          data: this._lamp.effective.schedule.map((r) => ({ x: r[0] + r[1] / 60, y: r.some((v) => v !== 0) ? r[ch + 2] : null })),
+          data: this._lamp.schedule.map((r) => ({ x: r[0] + r[1] / 60, y: r.some((v) => v !== 0) ? r[ch + 2] : null })),
           spanGaps: true,
           borderColor: COLORS[ch],
           borderDash: [5, 4],
@@ -546,7 +546,7 @@ class K7ScheduleCard extends HTMLElement {
     on("[data-act=pick]", "change", (e) => this._pick(e.target.value));
     on("[data-act=link]", "change", (e) => (this._linked = e.target.checked));
     on("[data-act=keeptimes]", "change", (e) => { this._keepTimes = !e.target.checked; });
-    on("[data-act=showeff]", "change", (e) => { this._showEff = e.target.checked; this._render(); });
+    on("[data-act=showlamp]", "change", (e) => { this._showLamp = e.target.checked; this._render(); });
     on("[data-act=daystart]", "change", async (e) => {
       const hour = e.target.value === "" ? null : +e.target.value;
       try {

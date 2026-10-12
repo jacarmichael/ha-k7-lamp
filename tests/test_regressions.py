@@ -5,7 +5,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from helpers import hourly
-from k7_lamp.effective import DEFAULT_MOON, build_effective, plan_window, rebuild_time, rebuild_window, validate_moon
+from k7_lamp.effective import build_effective, plan_window, rebuild_time, rebuild_window
+from k7_lamp.model import DEFAULT_MOON, Program, validate_moon
 from k7_lamp.protocol import (
     K7State, align_day_start, build_all_set, parse_qr_payload,
     parse_reply, shift_rows, state_rows, to_qr_payload,
@@ -43,8 +44,7 @@ def test_short_reply_only_adds_disabled_padding():
 def test_padding_does_not_dim_midnight_or_become_moonlight():
     rows = sparse([1, 0, 40, 0, 0, 0, 0, 0], [23, 0, 40, 0, 0, 0, 0, 0])
     assert parse_reply(reply(rows)).scheduled_levels(0)[0] == 40
-    prog = {"target_manual": [50] * 6, "target_schedule": rows,
-            "moon": {**DEFAULT_MOON, "follow_moon": False}}
+    prog = Program([50] * 6, rows, moon={**DEFAULT_MOON, "follow_moon": False})
     _, actual = build_effective(prog, datetime(2026, 10, 26, tzinfo=ZoneInfo("UTC")), 0, 0)
     assert actual[:22] == [[0] * 8 for _ in range(22)]
     assert actual[22][3] > 0
@@ -56,14 +56,15 @@ def test_moon_indices_rejected_before_indexing(key):
     with pytest.raises(ValueError):
         validate_moon(cfg)
     with pytest.raises(ValueError):
-        build_effective({"target_manual": [50] * 6, "target_schedule": hourly({}), "moon": cfg},
-                        datetime(2026, 10, 26, tzinfo=ZoneInfo("UTC")), 0, 0)
+        Program([50] * 6, hourly({}), moon=cfg)
 
 
 def test_nonhourly_alignment_preserves_intervals_and_padding():
     rows = sparse([8, 45, 0, 0, 0, 0, 0, 0], [9, 30, 20, 0, 0, 0, 0, 0], [21, 15, 0, 0, 0, 0, 0, 0])
     shifted = align_day_start(rows, 11)
-    assert shifted == sparse([10, 15, 0, 0, 0, 0, 0, 0], [11, 0, 20, 0, 0, 0, 0, 0], [22, 45, 0, 0, 0, 0, 0, 0])
+    assert shifted == sparse(
+        [10, 15, 0, 0, 0, 0, 0, 0], [11, 0, 20, 0, 0, 0, 0, 0], [22, 45, 0, 0, 0, 0, 0, 0]
+    )
     assert shift_rows(shift_rows(rows, 2), -2) == rows
 
 

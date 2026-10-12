@@ -3,22 +3,37 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from functools import wraps
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
 from .acclimation import day_number, percent_for, scale
 from .const import ALL_SET_SETTLE, DOMAIN, SCAN_INTERVAL
+from .effective import rebuild_time
+from .model import DEFAULT_MOON, Acclimation, Program, validate_moon
 from .moon import moon_illumination, moon_level, phase_icon, phase_name, rise_set
-from .effective import DEFAULT_MOON, build_effective, plan_window, rebuild_time, validate_moon
+from .planner import (
+    FAILED,
+    WRITTEN,
+    Defer,
+    Unchanged,
+    Write,
+    check_lamp,
+    confirmed,
+    is_pending,
+    lamp_runs,
+    plan,
+)
 from .program import ProgramStore
 from .protocol import (
     K7Error,
@@ -27,8 +42,8 @@ from .protocol import (
     acked,
     photoperiod,
     read_all,
-    state_rows,
     sort_rows,
+    state_rows,
     sync_time,
     validate_schedule,
     write_all_set,
@@ -37,8 +52,16 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 
-class AutomaticWriteDeferred(HomeAssistantError):
-    """The user's manual mode takes precedence over background maintenance."""
+class PlanDeferred(HomeAssistantError):
+    """The lamp was read, and the planner decided not to write now."""
+
+    def __init__(self, defer: Defer) -> None:
+        super().__init__(defer.message)
+        self.defer = defer
+
+
+class ReadbackError(HomeAssistantError):
+    """The lamp acknowledged an ALL_SET but doesn't (verifiably) run it."""
 
 
 def _program_action(method):
@@ -66,6 +89,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         self.lock = asyncio.Lock()
         self._program_lock = asyncio.Lock()
         self._last_plan_notice: str | None = None
+        self._failed_polls = 0
 
     async def _read(self) -> K7State:
         """ALL_READ with one retry; the lamp copes badly with concurrent clients."""
@@ -78,40 +102,40 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
     async def _async_update_data(self) -> K7State:
         async with self.lock:
             try:
-                return await self._read()
+                state = await self._read()
             except K7Error as err:
+                # Another client (the app, the Mac app) can briefly block the lamp; one miss is noise.
+                self._failed_polls += 1
+                if self.data is not None and self._failed_polls < 2:
+                    _LOGGER.debug("Poll of %s failed, keeping the last state: %s", self.host, err)
+                    return self.data
                 raise UpdateFailed(str(err)) from err
+        self._failed_polls = 0
+        return state
 
-    async def async_apply_schedule(
-        self, manual: list[int], schedule: list[Row], *, automatic: bool = False,
-    ) -> bool:
-        """Write the schedule with ALL_SET (auto mode, local time). Returns False if unchanged."""
-        try:
-            validate_schedule(manual, schedule)
-        except ValueError as err:
-            raise HomeAssistantError(f"Invalid schedule: {err}") from err
-        schedule = sort_rows(schedule)
+    async def async_apply_schedule(self, manual: list[int], schedule: list[Row]) -> bool:
+        """Write a schedule now (no program). Returns False if the lamp already has it."""
+        schedule = self._validate(manual, schedule)
+        return await self._write_plan(Write(list(manual), schedule, None, 100), explicit=True)
+
+    async def _write_plan(self, step: Write, *, explicit: bool) -> bool:
+        """Read, decide, ALL_SET and read back under the lamp lock. False if unchanged."""
         async with self.lock:
             try:
                 current = await self._read()
             except K7Error as err:
                 raise HomeAssistantError(f"Lamp not reachable: {err}") from err
             self.async_set_updated_data(current)
-            if automatic:
-                if not current.auto:
-                    raise AutomaticWriteDeferred("Lamp is in manual mode; automatic plan update deferred")
-                manual = list(current.manual)
-            if current.auto and current.manual == manual and state_rows(current) == schedule:
+            action = check_lamp(step, current, self.program(), dt_util.now(), explicit=explicit)
+            if isinstance(action, Defer):
+                raise PlanDeferred(action)
+            if isinstance(action, Unchanged):
                 _LOGGER.debug("Schedule already on the lamp; skipping ALL_SET")
                 return False
             now = dt_util.now()
-            if automatic:
-                window = plan_window(self.target()[1], now)
-                if window is None or now + timedelta(seconds=ALL_SET_SETTLE + 5) > window[1]:
-                    raise AutomaticWriteDeferred("Safe write window ended while waiting for the lamp; automatic update deferred")
             try:
                 reply = await write_all_set(
-                    self.host, self.port, manual, schedule, True,
+                    self.host, self.port, action.manual, action.schedule, True,
                     now.hour, now.minute, now.second,
                 )
             except K7Error as err:
@@ -121,14 +145,19 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
                     f"Lamp did not acknowledge the schedule (reply: {reply.hex(' ') or 'none'})"
                 )
             _LOGGER.info("Schedule written to %s", self.host)
+            if (prog := self.program()) is not None:
+                # Before the read-back: whatever it shows, this cycle has had its write.
+                await self._store.async_set(self._id, replace(prog, written_cycle=action.cycle))
             await asyncio.sleep(ALL_SET_SETTLE)
             try:
                 actual = await self._read()
             except K7Error as err:
-                raise HomeAssistantError("Schedule acknowledged but read-back failed; update remains pending") from err
+                raise ReadbackError(
+                    "Schedule acknowledged but read-back failed; update remains pending"
+                ) from err
             self.async_set_updated_data(actual)
-            if not actual.auto or actual.manual != manual or state_rows(actual) != schedule:
-                raise HomeAssistantError("Lamp read-back does not match the requested schedule")
+            if not lamp_runs(actual, action.manual, action.schedule):
+                raise ReadbackError("Lamp read-back does not match the requested schedule")
         return True
 
     async def async_sync_clock(self) -> None:
@@ -153,8 +182,13 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
     def _id(self) -> str:
         return self.config_entry.entry_id
 
-    def program(self) -> dict[str, Any] | None:
+    def program(self) -> Program | None:
         return self._store.get(self._id)
+
+    async def _set_program(self, prog: Program) -> None:
+        """Store a program the user configured; it replaces one set aside as invalid."""
+        await self._store.async_set(self._id, prog)
+        ir.async_delete_issue(self.hass, DOMAIN, f"invalid_program_{self._id}")
 
     def _validate(self, manual: list[int], schedule: list[Row]) -> list[Row]:
         try:
@@ -163,38 +197,20 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
             raise HomeAssistantError(f"Invalid schedule: {err}") from err
         return sort_rows(schedule)
 
-    def _new_program(self) -> dict[str, Any]:
+    def _new_program(self) -> Program:
         """Start a program from what the lamp runs now."""
-        return {
-            "target_manual": list(self.data.manual),
-            "target_schedule": state_rows(self.data),
-            "acclimation": None,
-            "moon": None,
-        }
+        return Program(list(self.data.manual), state_rows(self.data))
 
     def target(self) -> tuple[list[int], list[Row]]:
-        prog = self.program()
-        if prog:
-            return prog["target_manual"], prog["target_schedule"]
+        if prog := self.program():
+            return prog.target_manual, prog.target_schedule
         return self.data.manual, state_rows(self.data)
-
-    def effective(self) -> tuple[list[int], list[Row]] | None:
-        """What was actually read from the lamp, not a newly calculated forecast."""
-        if self.program() is None:
-            return None
-        return list(self.data.manual), state_rows(self.data)
 
     def plan_pending(self) -> bool:
         prog = self.program()
-        if prog is None:
-            return False
-        applied = prog.get("applied")
-        if prog.get("pending") or not applied:
-            return True
-        window = plan_window(prog["target_schedule"], dt_util.now())
-        return window is not None and applied.get("cycle") != window[0].isoformat()
+        return prog is not None and is_pending(prog, dt_util.now())
 
-    def _notify(self, topic: str, message: str) -> None:
+    def notify(self, topic: str, message: str) -> None:
         persistent_notification.async_create(
             self.hass, message,
             title=f"{self.config_entry.title} {topic}",
@@ -206,56 +222,43 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         """Background catch-up and retries, only inside the target's dark window."""
         await self._async_rebuild_locked(explicit=False)
 
-    def _plan_notice(self, key: str, message: str) -> None:
-        if self._last_plan_notice != key:
-            self._last_plan_notice = key
-            self._notify("schedule", message)
+    def _plan_notice(self, defer: Defer) -> None:
+        if self._last_plan_notice != defer.key:
+            self._last_plan_notice = defer.key
+            self.notify("schedule", defer.message)
 
     async def _async_rebuild_locked(self, *, explicit: bool) -> bool:
         """Caller owns _program_lock, so an older rebuild cannot clear a new program."""
         prog = self.program()
         if prog is None:
             return False
-        now = dt_util.now()
-        window = plan_window(prog["target_schedule"], now)
-        cycle = window[0].isoformat() if window else None
-        applied = prog.get("applied") or {}
-        if not explicit:
-            if window is None:
-                self._plan_notice(str(now.date()), "No dark interval long enough for an automatic write. Apply changes explicitly or add a dark interval.")
-                return False
-            if applied.get("cycle") == cycle and not prog.get("pending"):
-                return False
-            if now >= window[1]:
-                self._plan_notice(cycle, "The daily plan has not been confirmed. The safe write window has passed; it will be retried in the next dark window, or you can Apply explicitly.")
-                return False
-        # Use one fixed anchor for all retries of this daily cycle.
-        anchor = now if explicit else window[0]
         cfg = self.hass.config
-        manual, schedule = build_effective(prog, anchor, cfg.latitude, cfg.longitude)
-        try:
-            written = await self.async_apply_schedule(manual, schedule, automatic=not explicit)
-        except AutomaticWriteDeferred as err:
-            self._plan_notice(f"{cycle}:deferred", str(err))
+        step = plan(prog, dt_util.now(), cfg.latitude, cfg.longitude, explicit=explicit)
+        if step is None:
             return False
-        except HomeAssistantError:
-            self._plan_notice(f"{cycle}:failed", "The plan could not be confirmed. Automatic updates retry every five minutes within the dark window and check the lamp before writing again.")
+        if isinstance(step, Defer):
+            self._plan_notice(step)
+            return False
+        try:
+            written = await self._write_plan(step, explicit=explicit)
+        except PlanDeferred as err:
+            self._plan_notice(err.defer)
+            return False
+        except ReadbackError as err:
+            # Same key as the planner's later deferral, so this is one notification.
+            self._plan_notice(Defer(f"{step.cycle}:written", str(err) if explicit else WRITTEN))
             raise
-        acc = prog.get("acclimation")
-        percent = percent_for(acc["start_pct"], acc["days"], date.fromisoformat(acc["started"]), anchor.date()) if acc else 100
-        finished = acc is not None and percent >= 100
-        if finished:
-            prog = {**prog, "acclimation": None}
-        if not prog.get("acclimation") and not (prog.get("moon") or {}).get("enabled"):
+        except HomeAssistantError as err:
+            self._plan_notice(Defer(f"{step.cycle}:failed", str(err) if explicit else FAILED))
+            raise
+        # Re-read: the write recorded its cycle in the program.
+        prog, finished = confirmed(self.program(), step, dt_util.now())
+        if prog is None:
             await self._store.async_clear(self._id)
         else:
-            await self._store.async_set(self._id, {
-                **prog, "pending": False,
-                "applied": {"cycle": cycle, "at": now.isoformat(), "percent": percent,
-                            "manual": list(self.data.manual), "schedule": state_rows(self.data)},
-            })
+            await self._store.async_set(self._id, prog)
         if finished:
-            self._notify("acclimation", "Acclimation finished; the full schedule was confirmed on the lamp.")
+            self.notify("acclimation", "Acclimation finished; the full schedule was confirmed on the lamp.")
         self._last_plan_notice = None
         persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_schedule_{self._id}")
         self.async_update_listeners()
@@ -268,31 +271,27 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         prog = self.program()
         if prog is None:
             return await self.async_apply_schedule(manual, schedule)
-        await self._store.async_set(
-            self._id, {**prog, "target_manual": list(manual), "target_schedule": schedule, "pending": True}
-        )
+        await self._set_program(replace(prog, target_manual=manual, target_schedule=schedule, pending=True))
         return await self._async_rebuild_locked(explicit=True)
 
     # --- Acclimation ---
 
     def acclimation_info(self) -> dict[str, Any] | None:
         prog = self.program()
-        acc = prog and prog.get("acclimation")
-        if not acc:
+        if prog is None or (acc := prog.acclimation) is None:
             return None
-        started = date.fromisoformat(acc["started"])
         today = dt_util.now().date()
         return {
-            "start_percent": acc["start_pct"],
-            "days": acc["days"],
-            "started": acc["started"],
-            "ends": (started + timedelta(days=acc["days"])).isoformat(),
-            "day": day_number(started, today),
-            "percent": percent_for(acc["start_pct"], acc["days"], started, today),
-            "applied_percent": (prog.get("applied") or {}).get("percent"),
-            "applied_at": (prog.get("applied") or {}).get("at"),
-            "target_manual": prog["target_manual"],
-            "target_schedule": prog["target_schedule"],
+            "start_percent": acc.start_pct,
+            "days": acc.days,
+            "started": acc.started.isoformat(),
+            "ends": (acc.started + timedelta(days=acc.days)).isoformat(),
+            "day": day_number(acc.started, today),
+            "percent": percent_for(acc.start_pct, acc.days, acc.started, today),
+            "applied_percent": prog.applied.percent if prog.applied else None,
+            "applied_at": prog.applied.at if prog.applied else None,
+            "target_manual": prog.target_manual,
+            "target_schedule": prog.target_schedule,
         }
 
     @_program_action
@@ -301,20 +300,17 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         started: date | None = None,
     ) -> None:
         schedule = self._validate(manual, schedule)
-        if not 1 <= start_pct <= 99 or not 1 <= days <= 120:
-            raise HomeAssistantError("Start must be 1-99% and duration 1-120 days")
-        started = started or dt_util.now().date()
+        try:
+            acc = Acclimation(start_pct, days, started or dt_util.now().date())
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
         prog = self.program() or self._new_program()
-        await self._store.async_set(self._id, {
-            **prog,
-            "target_manual": list(manual),
-            "target_schedule": schedule,
-            "acclimation": {"start_pct": start_pct, "days": days, "started": started.isoformat()},
-            "pending": True,
-        })
+        await self._set_program(replace(
+            prog, target_manual=manual, target_schedule=schedule, acclimation=acc, pending=True,
+        ))
         await self._async_rebuild_locked(explicit=True)
         if info := self.acclimation_info():
-            self._notify("acclimation",
+            self.notify("acclimation",
                 f"Acclimation started: {start_pct}% rising to 100% over {days} days "
                 f"(until {info['ends']}). Today: {info['percent']}%. "
                 "The lamp gets the next step daily, shortly before lights-on.")
@@ -325,16 +321,19 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         if info is None:
             return
         prog = self.program()
-        target = (prog["target_manual"], prog["target_schedule"])
+        manual, schedule = prog.target_manual, prog.target_schedule
         if keep_current:
             if info["applied_percent"] is None:
-                raise HomeAssistantError("No confirmed acclimation level is available yet; apply the target first or choose the full schedule")
-            target = scale(*target, info["applied_percent"])
-        await self._store.async_set(self._id, {
-            **prog, "target_manual": target[0], "target_schedule": target[1], "acclimation": None, "pending": True,
-        })
+                raise HomeAssistantError(
+                    "No confirmed acclimation level is available yet; "
+                    "apply the target first or choose the full schedule"
+                )
+            manual, schedule = scale(manual, schedule, info["applied_percent"])
+        await self._set_program(replace(
+            prog, target_manual=manual, target_schedule=schedule, acclimation=None, pending=True,
+        ))
         await self._async_rebuild_locked(explicit=True)
-        self._notify("acclimation", "Acclimation stopped; " + (
+        self.notify("acclimation", "Acclimation stopped; " + (
             "the lamp keeps today's reduced schedule." if keep_current
             else "the lamp is back on the full schedule."))
 
@@ -342,8 +341,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
 
     def moon_config(self) -> dict[str, Any]:
         prog = self.program()
-        cfg = prog.get("moon") if prog else None
-        return cfg or {**DEFAULT_MOON, "enabled": False}
+        return (prog.moon if prog else None) or {**DEFAULT_MOON, "enabled": False}
 
     @_program_action
     async def async_set_moon(self, config: dict[str, Any]) -> None:
@@ -356,7 +354,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
             if not cfg["enabled"]:
                 return
             prog = self._new_program()
-        await self._store.async_set(self._id, {**prog, "moon": cfg, "pending": True})
+        await self._set_program(replace(prog, moon=cfg, pending=True))
         self._moon_cache = None  # before rebuild, which refreshes the sensors
         await self._async_rebuild_locked(explicit=True)
 
@@ -372,7 +370,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         frac, phase = moon_illumination(utc)
         rise, sets = rise_set(utc, lat, lon)
         cfg = self.moon_config()
-        level = moon_level(utc, lat, lon, cfg["max_level"], cfg.get("follow_moon", True))
+        level = moon_level(utc, lat, lon, cfg["max_level"], cfg["follow_moon"])
         info = {
             "illumination": round(frac * 100),
             "phase": round(phase, 3),

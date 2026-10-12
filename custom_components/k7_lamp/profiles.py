@@ -39,7 +39,9 @@ class ProfileStore:
         if entry_id in self.originals:
             return
         validate_schedule(manual, schedule)
-        self.originals[entry_id] = {"name": f"Original ({title})", "manual": list(manual), "schedule": sort_rows(schedule)}
+        self.originals[entry_id] = {
+            "name": f"Original ({title})", "manual": list(manual), "schedule": sort_rows(schedule),
+        }
         await self._save()
 
     async def async_save(self, name: str, manual: list[int], schedule: list[Row]) -> None:

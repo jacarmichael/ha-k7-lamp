@@ -121,3 +121,23 @@ test('per-lamp original backup loads exact times even with alignment enabled', (
   card._pick('original');
   assert.deepEqual(JSON.parse(JSON.stringify(card._draft.schedule)), schedule);
 });
+
+// Same vectors as tests/test_schedule_vectors.py, so the card's copy of the maths can't drift.
+const vectors = JSON.parse(fs.readFileSync(path.join(__dirname, 'schedule_vectors.json'), 'utf8'));
+for (const c of vectors.cases) {
+  test(`schedule maths matches protocol.py: ${c.name}`, () => {
+    const {context} = environment();
+    context.rows = c.rows;
+    const run = (expr) => JSON.parse(JSON.stringify(vm.runInContext(expr, context)));
+    assert.deepEqual(run('activeRows(rows)'), c.active_rows);
+    assert.equal(vm.runInContext('dayStart(rows)', context), c.day_start);
+    assert.deepEqual(run('photoperiod(rows)'), c.photoperiod);
+    for (const [fn, key, list] of [['shiftRows', 'hours', c.shift], ['alignDayStart', 'hour', c.align]]) {
+      for (const expected of list) {
+        const expr = `${fn}(rows, ${expected[key]})`;
+        if (expected.error) assert.throws(() => vm.runInContext(expr, context), /dark boundary/);
+        else assert.deepEqual(run(expr), expected.rows, expr);
+      }
+    }
+  });
+}

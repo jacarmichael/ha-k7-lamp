@@ -1,5 +1,6 @@
 """Real HA classes/storage/services with a fake lamp; no hardware or network."""
 import asyncio
+from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -13,11 +14,14 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.storage import Store
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from helpers import hourly, sample_schedule
 from custom_components import k7_lamp as integration
 from custom_components.k7_lamp import binary_sensor, button, config_flow, coordinator, sensor, websocket
-from custom_components.k7_lamp.effective import DEFAULT_MOON
+from custom_components.k7_lamp.model import DEFAULT_MOON, Program
 from custom_components.k7_lamp.profiles import ProfileStore
 from custom_components.k7_lamp.program import ProgramStore
 from custom_components.k7_lamp.protocol import K7Error, K7State, state_rows
@@ -30,10 +34,14 @@ def entry(name="one"):
                        state=ConfigEntryState.SETUP_IN_PROGRESS)
 
 
-def program(**changes):
+def raw_program(**changes):
     return {"target_manual": [50] * 6, "target_schedule": sample_schedule(),
             "acclimation": {"start_pct": 50, "days": 30, "started": "2026-10-26"},
             "moon": None, **changes}
+
+
+def program(**changes):
+    return Program.from_dict(raw_program(**changes))
 
 
 def state(rows=None, *, auto=True, manual=None):
@@ -47,6 +55,7 @@ def run(tmp_path, monkeypatch):
     def execute(test):
         async def scenario():
             hass = HomeAssistant(str(tmp_path))
+            await ir.async_load(hass)
             hass.config.latitude, hass.config.longitude = 8.98, -79.52
             clock = SimpleNamespace(now=datetime(2026, 10, 26, 7, 30, tzinfo=ZoneInfo("America/Panama")))
             monkeypatch.setattr(coordinator.dt_util, "now", lambda: clock.now)
@@ -102,17 +111,17 @@ def test_service_schema_rejects_bad_channel(key):
 
 def test_existing_invalid_program_is_quarantined_and_others_survive(run):
     async def check(e):
-        bad = program(moon={**DEFAULT_MOON, "channels": {"7": 100}})
-        await e.store._store.async_save({"programs": {"bad": bad, "good": program()}, "prefs": {}})
+        bad = raw_program(moon={**DEFAULT_MOON, "channels": {"7": 100}})
+        await e.store._store.async_save({"programs": {"bad": bad, "good": raw_program()}, "prefs": {}})
         loaded = ProgramStore(e.hass)
         await loaded.async_load()
         assert loaded.get("bad") is None
         assert loaded.get("good") is not None
-        assert loaded.invalid_programs["bad"] == bad
-        assert "bad" in loaded.errors
+        assert loaded.invalid_programs["bad"]["program"] == bad
+        assert "channel" in loaded.invalid("bad")
         again = ProgramStore(e.hass)
         await again.async_load()
-        assert again.invalid_programs["bad"] == bad
+        assert again.invalid_programs["bad"]["program"] == bad
     run(check)
 
 
@@ -123,7 +132,7 @@ def test_background_rebuild_respects_manual_and_preserves_manual_levels(run):
         e.lamp.state.manual = [12] * 6
         await e.c.async_rebuild()
         assert not e.lamp.writes
-        assert e.store.get("one").get("applied") is None
+        assert e.store.get("one").applied is None
         e.lamp.state.auto = True
         e.clock.now += timedelta(minutes=5)
         await e.c.async_rebuild()
@@ -154,7 +163,7 @@ def test_restart_and_repeated_ticks_do_not_rewrite_confirmed_cycle(run):
         e.clock.now = e.clock.now.replace(hour=14)
         await e.c.async_rebuild()
         assert len(e.lamp.writes) == 1
-        assert e.c.effective()[1] == state_rows(e.lamp.state)
+        assert state_rows(e.c.data) == state_rows(e.lamp.state)
     run(check)
 
 
@@ -235,7 +244,9 @@ def test_domain_setup_registers_real_services_and_websocket_commands(run):
             assert e.hass.services.has_service("k7_lamp", name)
         e.hass.http.async_register_static_paths.assert_awaited_once()
         with pytest.raises(vol.Invalid):
-            await e.hass.services.async_call("k7_lamp", "set_moonlight", {"enabled": True, "channels": {"7": 100}}, blocking=True)
+            await e.hass.services.async_call(
+                "k7_lamp", "set_moonlight", {"enabled": True, "channels": {"7": 100}}, blocking=True
+            )
     run(check)
 
 
@@ -245,7 +256,7 @@ def test_readback_mismatch_does_not_mark_program_applied(run):
         e.lamp.accept = False
         with pytest.raises(HomeAssistantError, match="read-back"):
             await e.c.async_rebuild()
-        assert e.store.get("one").get("applied") is None
+        assert e.store.get("one").applied is None
     run(check)
 
 
@@ -287,9 +298,10 @@ def test_new_program_survives_overlapping_stop_and_start(run):
         await asyncio.sleep(0)
         release.set()
         await asyncio.gather(stopping, starting)
-        assert e.store.get("one")["moon"]["enabled"]
-        assert e.store.get("one")["acclimation"] is None
-        assert e.store.get("one")["applied"]["schedule"] == state_rows(e.lamp.state)
+        assert e.store.get("one").moon["enabled"]
+        assert e.store.get("one").acclimation is None
+        assert e.store.get("one").applied is not None
+        assert state_rows(e.c.data) == state_rows(e.lamp.state)
     run(check)
 
 
@@ -316,19 +328,33 @@ def test_mini_config_flow_aborts(run, name):
     run(check)
 
 
+async def setup_entry(e):
+    """Run the real async_setup_entry and platforms; return (entities, timer callbacks)."""
+    entities, callbacks = [], []
+
+    async def forward(ent, platforms):
+        for module in (sensor, button, binary_sensor):
+            await module.async_setup_entry(e.hass, ent, entities.extend)
+    e.hass.config_entries = SimpleNamespace(async_forward_entry_setups=forward)
+    e.monkeypatch.setattr(integration, "K7Coordinator", lambda hass, ent: e.c)
+    e.monkeypatch.setattr(integration, "async_track_time_change",
+                          lambda hass, fn, **kwargs: callbacks.append(fn) or (lambda: None))
+    await integration.async_setup_entry(e.hass, e.c.config_entry)
+    await e.hass.async_block_till_done()
+    return entities, callbacks
+
+
+async def load_store(e):
+    store = ProgramStore(e.hass)
+    await store.async_load()
+    e.hass.data["k7_lamp"]["program"] = store
+    return store
+
+
 def test_real_setup_platforms_and_retry_tick_on_minimum_ha(run):
     async def check(e):
-        entities, callbacks = [], []
-        async def forward(ent, platforms):
-            for module in (sensor, button, binary_sensor):
-                await module.async_setup_entry(e.hass, ent, entities.extend)
-        e.hass.config_entries = SimpleNamespace(async_forward_entry_setups=forward)
-        e.monkeypatch.setattr(integration, "K7Coordinator", lambda hass, ent: e.c)
-        e.monkeypatch.setattr(integration, "async_track_time_change",
-                             lambda hass, fn, **kwargs: callbacks.append(fn) or (lambda: None))
         e.clock.now = e.clock.now.replace(hour=14)
-        await integration.async_setup_entry(e.hass, e.c.config_entry)
-        await e.hass.async_block_till_done()
+        entities, callbacks = await setup_entry(e)
         assert len(entities) == 17
         assert "one" in e.profiles.originals
         await e.store.async_set("one", program())
@@ -349,10 +375,116 @@ def test_websocket_listing_isolates_one_corrupt_program(run):
         other = coordinator.K7Coordinator(e.hass, entry("two"))
         other.data = state()
         other.config_entry.runtime_data = other
-        e.hass.config_entries = SimpleNamespace(async_loaded_entries=lambda domain: [e.c.config_entry, other.config_entry])
-        e.store.programs["one"] = {"bad": "data"}
+        entries = [e.c.config_entry, other.config_entry]
+        e.hass.config_entries = SimpleNamespace(async_loaded_entries=lambda domain: entries)
+
+        def corrupt():
+            raise ValueError("corrupt")
+        e.c.acclimation_info = corrupt
         lamps = websocket._lamps(e.hass)
         assert lamps[0]["program_error"]
         assert lamps[1]["entry_id"] == "two" and "program_error" not in lamps[1]
         await other.async_shutdown()
+    run(check)
+
+
+def test_readback_mismatch_writes_once_per_cycle_but_apply_still_writes(run):
+    async def check(e):
+        await e.store.async_set("one", program())
+        e.lamp.accept = False  # acknowledges, but keeps its old schedule
+        for tick in range(6):
+            with suppress(HomeAssistantError):
+                await e.c.async_rebuild()
+            if tick == 0:
+                await load_store(e)  # the write is remembered across a restart
+            e.clock.now += timedelta(minutes=5)
+        assert len(e.lamp.writes) == 1
+        assert e.c.plan_pending()
+        e.lamp.accept = True
+        await e.c.async_set_target([50] * 6, sample_schedule())
+        assert len(e.lamp.writes) == 2
+        assert not e.c.plan_pending()
+    run(check)
+
+
+def test_lost_readback_is_confirmed_by_the_next_read(run):
+    async def check(e):
+        await e.store.async_set("one", program())
+        reads = 0
+
+        async def lose_second_read():
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                raise K7Error("read-back lost")
+            return await e.read()
+        e.c._read = lose_second_read
+        with pytest.raises(HomeAssistantError, match="read-back"):
+            await e.c.async_rebuild()
+        e.clock.now += timedelta(minutes=5)
+        await e.c.async_rebuild()
+        assert len(e.lamp.writes) == 1
+        assert e.store.get("one").applied.percent == 50
+    run(check)
+
+
+def test_quarantined_program_raises_repair_issue_until_replaced(run):
+    async def check(e):
+        bad = raw_program(moon={**DEFAULT_MOON, "channels": {"7": 100}})
+        await e.store._store.async_save({"programs": {"one": bad}, "prefs": {}})
+        await load_store(e)
+        await setup_entry(e)
+        issues = ir.async_get(e.hass)
+        assert issues.async_get_issue("k7_lamp", "invalid_program_one") is not None
+        await e.c.async_set_moon({"enabled": True})
+        assert issues.async_get_issue("k7_lamp", "invalid_program_one") is None
+        await e.c.async_set_moon({"enabled": False})  # nothing left to layer: program cleared
+        again = await load_store(e)
+        assert again.get("one") is None and again.invalid("one") is None
+    run(check)
+
+
+def test_upgrade_from_storage_1_1_neither_rewrites_nor_warns(run):
+    async def check(e):
+        old = Store(e.hass, 1, "k7_lamp.program")  # v0.5.1 layout, minor version 1
+        await old.async_save({"programs": {"one": raw_program(moon=deepcopy(DEFAULT_MOON))}, "prefs": {}})
+        e.clock.now = e.clock.now.replace(hour=14)
+        store = await load_store(e)
+        assert store.get("one").applied.cycle == e.clock.now.replace(hour=7, minute=30).isoformat()
+        assert not e.c.plan_pending()
+        await e.c.async_rebuild()
+        assert not e.lamp.writes
+        e.clock.now = (e.clock.now + timedelta(days=1)).replace(hour=7, minute=30)
+        await e.c.async_rebuild()
+        assert len(e.lamp.writes) == 1
+    run(check)
+
+
+def test_one_failed_poll_keeps_the_last_state(run):
+    async def check(e):
+        e.lamp.read_errors = 2
+        assert await e.c._async_update_data() is e.c.data
+        with pytest.raises(UpdateFailed):
+            await e.c._async_update_data()
+        assert (await e.c._async_update_data()).name == "K7_Pro12345"
+        e.lamp.read_errors = 1
+        assert await e.c._async_update_data() is e.c.data  # a success resets the count
+    run(check)
+
+
+def test_output_sensor_follows_the_clock_between_polls(run):
+    async def check(e):
+        timers = []
+        e.monkeypatch.setattr(sensor, "async_track_time_change",
+                              lambda hass, fn, **kwargs: timers.append((fn, kwargs)) or (lambda: None))
+        ent = sensor.K7OutputSensor(e.c, 1, "Royal Blue")
+        ent.hass = e.hass
+        written = []
+        ent.async_write_ha_state = lambda: written.append(ent.native_value)
+        await ent.async_added_to_hass()
+        [(tick, kwargs)] = timers
+        assert kwargs == {"second": 0}
+        e.clock.now = e.clock.now.replace(hour=9, minute=30)  # Royal Blue 10% at 09:00, 30% at 10:00
+        tick(e.clock.now)
+        assert written == [20]
     run(check)

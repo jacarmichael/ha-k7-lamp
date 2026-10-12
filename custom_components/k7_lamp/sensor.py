@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.const import PERCENTAGE, EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.util import dt as dt_util
 
 from .coordinator import K7ConfigEntry, K7Coordinator
@@ -75,6 +76,15 @@ class K7OutputSensor(K7Entity, SensorEntity):
         self._idx = idx
         self._attr_name = f"{channel} output"
 
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # The estimate moves along the schedule every minute; the lamp is polled far less often.
+        self.async_on_remove(async_track_time_change(self.hass, self._async_minute, second=0))
+
+    @callback
+    def _async_minute(self, _now) -> None:
+        self.async_write_ha_state()
+
     @property
     def native_value(self) -> int:
         return self.coordinator.data.output_levels(_now_minute())[self._idx]
@@ -103,7 +113,7 @@ class K7ManualLevelSensor(K7Entity, SensorEntity):
 
 
 class K7AcclimationSensor(K7Entity, SensorEntity):
-    """Today's acclimation intensity (100% when no acclimation is running)."""
+    """Last acclimation intensity confirmed on the lamp (100% without a program)."""
 
     _attr_name = "Acclimation intensity"
     _attr_icon = "mdi:sun-clock-outline"
@@ -119,7 +129,7 @@ class K7AcclimationSensor(K7Entity, SensorEntity):
         if prog is None:
             return 100
         # A failed stop/target update must not claim a percentage never confirmed.
-        return (prog.get("applied") or {}).get("percent")
+        return prog.applied.percent if prog.applied else None
 
     @property
     def extra_state_attributes(self) -> dict:

@@ -12,6 +12,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: pip install pytest homeassistant==2025.2.0
+      - run: pip install pytest ruff homeassistant==2025.2.0
+      - run: ruff check .
       - run: python -m pytest -q
       - run: node --test tests/test_frontend.cjs
