@@ -1,12 +1,14 @@
-"""Sensors: mode, estimated output and manual level per channel."""
+"""Sensors: mode, estimated output per channel, acclimation and moonlight."""
 from __future__ import annotations
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
-from homeassistant.const import PERCENTAGE, EntityCategory
+from homeassistant.const import PERCENTAGE, Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
+from .const import DOMAIN
 from .coordinator import K7ConfigEntry, K7Coordinator
 from .entity import K7Entity
 from .protocol import CHANNELS
@@ -32,8 +34,14 @@ async def async_setup_entry(
     ]
     for idx, channel in enumerate(CHANNELS):
         entities.append(K7OutputSensor(coordinator, idx, channel))
-        entities.append(K7ManualLevelSensor(coordinator, idx, channel))
     async_add_entities(entities)
+
+    # The read-only manual level sensors were replaced by number sliders in 0.6.0.
+    registry = er.async_get(hass)
+    for channel in CHANNELS:
+        unique_id = f"{entry.unique_id}_manual_{_slug(channel)}"
+        if entity_id := registry.async_get_entity_id(Platform.SENSOR, DOMAIN, unique_id):
+            registry.async_remove(entity_id)
 
 
 class K7ModeSensor(K7Entity, SensorEntity):
@@ -82,24 +90,6 @@ class K7OutputSensor(K7Entity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict:
         return {"source": "schedule" if self.coordinator.data.auto else "manual"}
-
-
-class K7ManualLevelSensor(K7Entity, SensorEntity):
-    """The stored manual level (used when the lamp is in manual mode)."""
-
-    _attr_native_unit_of_measurement = PERCENTAGE
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
-    _attr_icon = "mdi:tune-vertical"
-
-    def __init__(self, coordinator: K7Coordinator, idx: int, channel: str) -> None:
-        super().__init__(coordinator, f"manual_{_slug(channel)}")
-        self._idx = idx
-        self._attr_name = f"{channel} manual level"
-
-    @property
-    def native_value(self) -> int:
-        return self.coordinator.data.manual[self._idx]
 
 
 class K7AcclimationSensor(K7Entity, SensorEntity):

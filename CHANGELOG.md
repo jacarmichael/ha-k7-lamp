@@ -4,6 +4,7 @@
 
 - `tools/k7_test.py` now ships inside the integration, so HACS installs it and updates no longer remove it.
 - Manual level sliders for each channel. Moving one puts the lamp in manual mode; the schedule is left alone, so switching back to auto returns to it.
+- Removed the read-only "manual level" diagnostic sensors (replaced by the sliders); their old entities are cleaned up automatically.
 
 ## 0.6.0b1 (beta)
 
