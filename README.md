@@ -62,7 +62,7 @@ Copy `custom_components/k7_lamp` into your Home Assistant `config/custom_compone
 1. Go to **Settings → Devices & services → Add integration → Noo-Psyche K7 Lamp**.
 2. Enter the lamp's IP address. The port defaults to 8266.
 
-Setup only reads from the lamp. The integration saves the lamp's current schedule as the profile **"Original (from lamp)"**.
+Setup only reads from the lamp. The integration saves the lamp's current schedule as **Original (lamp name)**, a backup for that lamp that you can load from the card's Load menu.
 
 ### The card
 The card registers itself as a dashboard resource. Add it to any dashboard:
@@ -78,7 +78,7 @@ If your dashboards are in **YAML mode**, add the resource yourself:
 ```yaml
 lovelace:
   resources:
-    - url: /k7_lamp/k7-schedule-card.js?v=0.6.0b6
+    - url: /k7_lamp/k7-schedule-card.js?v=0.6.0b7
       type: module
 ```
 

@@ -52,6 +52,7 @@ def _lamps(hass: HomeAssistant) -> list[dict[str, Any]]:
                 "manual": state.manual if state else None,
                 "schedule": state_rows(state) if state else None,
                 "acclimation": coordinator.acclimation_info(),
+                "original": _profiles(hass).originals.get(entry.entry_id),
                 **_program_info(coordinator),
             }
         )
@@ -233,7 +234,7 @@ async def ws_stop_acclimation(hass, connection, msg):
         vol.Required("enabled"): bool,
         vol.Optional("max_level"): vol.All(vol.Coerce(int), vol.Range(1, 50)),
         vol.Optional("follow_moon"): bool,
-        vol.Optional("channels"): {vol.Coerce(str): vol.All(vol.Coerce(int), vol.Range(0, 100))},
+        vol.Optional("channels"): {vol.In(["0", "1", "2", "3", "4", "5"]): vol.All(vol.Coerce(int), vol.Range(0, 100))},
     }
 )
 @websocket_api.async_response

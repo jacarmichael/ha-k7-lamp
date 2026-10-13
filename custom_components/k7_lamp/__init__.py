@@ -17,7 +17,7 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import CARD_FILE, CLOCK_SYNC_DELAY, DOMAIN, FRONTEND_VERSION, URL_BASE
 from .coordinator import K7ConfigEntry, K7Coordinator
-from .profiles import ORIGINAL, ProfileStore
+from .profiles import ProfileStore
 from .program import ProgramStore
 from .protocol import align_day_start, parse_qr_payload, state_rows
 from .websocket import async_register_websocket_commands
@@ -52,7 +52,9 @@ START_ACCLIMATION_SCHEMA = SET_SCHEDULE_SCHEMA.extend(
 STOP_ACCLIMATION_SCHEMA = SYNC_CLOCK_SCHEMA.extend(
     {vol.Optional("keep_current", default=False): cv.boolean}
 )
-CHANNEL_WEIGHTS = vol.Schema({vol.Coerce(int): vol.All(vol.Coerce(int), vol.Range(0, 100))})
+CHANNEL_WEIGHTS = vol.Schema(
+    {vol.All(vol.Coerce(int), vol.Range(0, 5)): vol.All(vol.Coerce(int), vol.Range(0, 100))}
+)
 SET_MOONLIGHT_SCHEMA = SYNC_CLOCK_SCHEMA.extend(
     {
         vol.Required("enabled"): cv.boolean,
@@ -98,7 +100,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         elif "schedule" in call.data:
             manual, schedule = coordinator.data.manual, call.data["schedule"]
         elif "profile" in call.data:
-            if (prof := profiles.profiles.get(call.data["profile"])) is None:
+            if (prof := profiles.by_name(call.data["profile"])) is None:
                 raise ServiceValidationError(f"No profile named {call.data['profile']!r}")
             manual, schedule = prof["manual"], prof["schedule"]
         else:
@@ -182,10 +184,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
     entry.runtime_data = coordinator
 
     profiles: ProfileStore = hass.data[DOMAIN]["profiles"]
-    if ORIGINAL not in profiles.profiles:
-        state = coordinator.data
-        await profiles.async_save(ORIGINAL, state.manual, state_rows(state))
-        _LOGGER.info("Saved the lamp's current schedule as profile %r", ORIGINAL)
+    await profiles.async_capture_original(
+        entry.entry_id, entry.title, coordinator.data.manual, state_rows(coordinator.data),
+        only_lamp=len(hass.config_entries.async_entries(DOMAIN)) == 1,
+    )
 
     async def _daily_sync(_now) -> None:
         try:
@@ -224,3 +226,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> None:
+    """Drop the removed lamp's original backup."""
+    if (profiles := hass.data.get(DOMAIN, {}).get("profiles")) is not None:
+        await profiles.async_remove_original(entry.entry_id)

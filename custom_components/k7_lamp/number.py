@@ -4,7 +4,7 @@ from __future__ import annotations
 from homeassistant.components.number import NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .coordinator import K7ConfigEntry, K7Coordinator
 from .entity import K7Entity
@@ -14,7 +14,7 @@ from .protocol import CHANNELS
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: K7ConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
     coordinator = entry.runtime_data
     async_add_entities(

@@ -18,7 +18,7 @@ from homeassistant.util import dt as dt_util
 from .acclimation import day_number, percent_for, scale
 from .const import ALL_SET_SETTLE, DOMAIN, HAND_SETTLE, SCAN_INTERVAL
 from .moon import moon_illumination, moon_level, phase_icon, phase_name, rise_set
-from .effective import DEFAULT_MOON, build_effective, rebuild_time
+from .effective import DEFAULT_MOON, MOON_CHANNELS, build_effective, rebuild_time
 from .program import ProgramStore
 from .protocol import (
     K7Error,
@@ -330,6 +330,8 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
 
     async def async_set_moon(self, config: dict[str, Any]) -> None:
         cfg = {**DEFAULT_MOON, **self.moon_config(), **config}
+        if any(str(k) not in MOON_CHANNELS for k in cfg["channels"]):
+            raise HomeAssistantError("Moon channels must be numbered 0-5")
         cfg["channels"] = {str(k): int(v) for k, v in cfg["channels"].items() if int(v) > 0}
         if not 1 <= int(cfg["max_level"]) <= 50:
             raise HomeAssistantError("Maximum moon level must be 1-50%")

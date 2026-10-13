@@ -18,6 +18,7 @@ DEFAULT_MOON = {
     "follow_moon": True,
 }
 FALLBACK_REBUILD = (3, 30)
+MOON_CHANNELS = {"0", "1", "2", "3", "4", "5"}
 
 
 def rebuild_time(schedule: list[Row]) -> tuple[int, int]:
@@ -61,7 +62,8 @@ def build_effective(
         manual, schedule = scale(manual, schedule, pct)
     moon = program.get("moon")
     if moon and moon.get("enabled"):
-        weights = {int(ch): w for ch, w in moon["channels"].items() if w > 0}
+        # Skip channel numbers outside 0-5 (only possible in programs saved before 0.6).
+        weights = {int(ch): w for ch, w in moon["channels"].items() if w > 0 and str(ch) in MOON_CHANNELS}
         for row in schedule:
             when = next_slot_time(now, row[0], row[1]).astimezone(timezone.utc)
             level = moon_level(when, lat, lon, moon["max_level"], moon.get("follow_moon", True))

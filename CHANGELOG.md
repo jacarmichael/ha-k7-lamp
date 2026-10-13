@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0b7 (beta)
+
+Fixes found in a review by Jesse Scholtes (PR #1):
+
+- Schedule card: **Save moonlight** works again (it read the form after closing the panel and always failed).
+- Home Assistant 2025.2 can load the integration again (it used an entity callback type that only exists from 2025.3).
+- Moonlight channels must be numbered 0–5; an invalid channel number no longer breaks the daily plan or the card.
+- Each lamp now keeps its own **Original (lamp name)** backup, listed in the card's Load menu. With a single lamp, the existing "Original (from lamp)" profile becomes that lamp's backup.
+- Schedule card: the QR camera stops when you switch to another panel, even if camera permission is granted after you've moved on.
+- Schedule card: with "Move channels together" and "Show what the lamp runs" on, dragging no longer draws the dashed lamp lines at 0%.
+
 ## 0.6.0b6 (beta)
 
 - The card logs its version to the browser console, to check which version a page is running.

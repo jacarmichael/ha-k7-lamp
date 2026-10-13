@@ -44,6 +44,12 @@ def test_acclimation_scales_target_not_moon():
     assert eff[15][3] == 40 and eff[2][3] == plain[2][3]
 
 
+def test_invalid_moon_channel_is_skipped():
+    prog = program(moon={**DEFAULT_MOON, "channels": {"9": 100, "1": 100}})
+    _, eff = build_effective(prog, FULL_MOON_WRITE, LAT, LON)
+    assert eff[2][3] == 15  # Royal Blue still gets the moon; channel 9 is ignored
+
+
 def test_moon_off_is_plain_target():
     prog = program(moon=None)
     assert build_effective(prog, FULL_MOON_WRITE, LAT, LON)[1] == prog["target_schedule"]

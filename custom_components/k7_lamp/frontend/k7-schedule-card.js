@@ -6,7 +6,7 @@
  * bundled presets come from bitbarista/k7-led-controller (MIT); see NOTICE.md.
  */
 const BASE = "/k7_lamp";
-const VERSION = "0.6.0b6";
+const VERSION = "0.6.0b7";
 const COLORS = ["#f5f5f5", "#3b3bff", "#22c55e", "#9b30ff", "#00d5ff", "#ff3030"];
 
 const loaded = {};
@@ -210,6 +210,7 @@ class K7ScheduleCard extends HTMLElement {
   _render() {
     const root = this.shadowRoot;
     if (!root) return;
+    if (this._stream && this._panel !== "import") this._stopCamera();
     const ready = !!this._draft;
     const lamp = this._lamp;
     root.innerHTML = `
@@ -316,6 +317,7 @@ class K7ScheduleCard extends HTMLElement {
         <select data-act="pick">
           <option value="">Load a schedule…</option>
           <option value="lamp">Current lamp schedule</option>
+          ${this._lamp.original ? `<option value="original">${esc(this._lamp.original.name)}</option>` : ""}
           ${profileOpts ? `<optgroup label="Saved profiles">${profileOpts}</optgroup>` : ""}
           ${presetOpts ? `<optgroup label="Presets (bitbarista)">${presetOpts}</optgroup>` : ""}
         </select>
@@ -486,7 +488,7 @@ class K7ScheduleCard extends HTMLElement {
               if (this._linked) {
                 const delta = v - this._dragFrom;
                 this._chart.data.datasets.forEach((set, ch) => {
-                  if (ch !== ds && !set.hidden) set.data[idx].y = clamp(this._draft.schedule[idx][ch + 2] + delta);
+                  if (ch < this._channels.length && ch !== ds && !set.hidden) set.data[idx].y = clamp(this._draft.schedule[idx][ch + 2] + delta);
                 });
                 this._chart.update("none");
               }
@@ -587,12 +589,14 @@ class K7ScheduleCard extends HTMLElement {
     if (!value) return;
     let src = null;
     if (value === "lamp") src = this._lampData();
+    else if (value === "original") src = this._lamp.original;
     else if (value.startsWith("p:")) src = this._profiles[value.slice(2)];
     else if (value.startsWith("b:")) src = this._presets[+value.slice(2)];
     if (!src) return;
     if (value === "lamp") src = this._baseline();
     this._source = value;
-    const r = value === "lamp" ? { schedule: clone(src.schedule), note: "" } : this._aligned(clone(src.schedule));
+    // The lamp's own schedules keep their times; profiles and presets follow "Day starts at".
+    const r = value === "lamp" || value === "original" ? { schedule: clone(src.schedule), note: "" } : this._aligned(clone(src.schedule));
     this._draft = { manual: clone(src.manual), schedule: r.schedule };
     this._info(value === "lamp" ? "Loaded the current schedule." : `Loaded into the draft.${r.note} Nothing changes on the lamp until you Apply.`);
   }
@@ -644,11 +648,14 @@ class K7ScheduleCard extends HTMLElement {
           const channels = {};
           root.querySelectorAll("[data-moonch]").forEach((el) => (channels[el.dataset.moonch] = clamp(el.value)));
           const max = +val("max_level").value;
+          // Read the whole form now: _info() below re-renders the card without this panel.
+          const enabled = val("enabled").checked;
+          const follow_moon = val("follow_moon").checked;
           if (!(max >= 1 && max <= 50)) return this._error("Level at full moon must be 1–50%.");
           this._panel = null;
           this._info("Saving moonlight…");
           const res = await this._ws({ type: "k7_lamp/set_moonlight", entry_id: this._lamp.entry_id,
-            enabled: val("enabled").checked, max_level: max, follow_moon: val("follow_moon").checked, channels });
+            enabled, max_level: max, follow_moon, channels });
           this._updateLamp(res);
           return this._info(this._moonOn() ? "Moonlight saved; the lamp has tonight's moon." : "Moonlight off.");
         }
@@ -802,7 +809,9 @@ class K7ScheduleCard extends HTMLElement {
     this._lastBad = null;
     if (!navigator.mediaDevices?.getUserMedia) return this._error("Camera not available here (needs HTTPS). Use an image instead.");
     try {
-      this._stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      if (this._panel !== "import") return stream.getTracks().forEach((t) => t.stop()); // closed while asking
+      this._stream = stream;
       this._render();
     } catch (err) {
       this._error(err);
