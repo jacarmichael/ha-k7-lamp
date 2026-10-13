@@ -16,6 +16,7 @@ Local control of a **Noo-Psyche K7 Pro** reef light from Home Assistant, over yo
   - acclimation intensity
   - moonlight level
   - a connectivity check
+- **Mode selector:** switch the lamp between auto (runs the schedule) and manual (fixed levels).
 - **Schedule editor card:**
   - drag the 24-hour curve for each channel, or fine-tune one hour with sliders
   - a colour preview strip shows the blended colour for each hour
@@ -36,6 +37,7 @@ The lamp keeps running its own 24-point schedule in **auto** mode. Home Assistan
 
 - Once a day, while the tank is still dark shortly before lights-on, Home Assistant writes the day's plan to the lamp. The plan is your schedule, scaled for acclimation if one is running, plus tonight's moon.
 - If Home Assistant is down, the lamp carries on with the last plan it received. Your tank never depends on HA being up.
+- While the lamp is in **manual** mode, the daily write is skipped so it stays in manual. Switching back to auto writes today's plan straight away. Pressing **Apply** puts the lamp back in auto.
 - A full schedule write makes the lamp pause for a few seconds and resets its output. That's why it happens once a day in the dark, and otherwise only when you press **Apply**.
 
 ## Requirements
@@ -44,6 +46,7 @@ The lamp keeps running its own 24-point schedule in **auto** mode. Home Assistan
 - The lamp in **LAN mode**: in the Noo-Psyche app, join the lamp to your Wi-Fi.
 - Home Assistant 2025.2 or newer, able to reach the lamp on **TCP port 8266**. If the lamp is on a separate IoT VLAN, allow HA → lamp on 8266.
 - A DHCP reservation for the lamp is strongly recommended.
+- Master/slave lamp groups work. In the Noo-Psyche app, pair the slave to the master, then join the master to your Wi-Fi. Add only the master to Home Assistant; the slave follows it.
 
 ## Installation
 
@@ -96,7 +99,6 @@ lovelace:
 - Only one client at a time talks to the lamp reliably. The integration serialises its own access and retries, but the Noo-Psyche app polling at the same moment can cause the odd failed read.
 - The lamp has 24 hourly schedule points, so moonrise and moonset are accurate to the hour on the lamp. The calculation itself is within about 15 minutes of the US Naval Observatory.
 - Light levels are whole percentages, so a thin crescent moon rounds to 0–1%.
-- Master/slave lamp groups have not been tested. The integration controls the lamp you configure.
 - "Output" sensors are estimates calculated from the schedule. The lamp doesn't report what it's actually emitting.
 
 ## Troubleshooting

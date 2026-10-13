@@ -26,6 +26,7 @@ from .protocol import (
     acked,
     photoperiod,
     read_all,
+    set_mode,
     state_rows,
     sync_time,
     validate_schedule,
@@ -111,6 +112,23 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         if not acked(reply):
             raise HomeAssistantError("Lamp did not acknowledge the clock sync")
         _LOGGER.debug("Clock synced to %s on %s", now.strftime("%H:%M:%S"), self.host)
+
+    async def async_set_mode(self, auto: bool) -> None:
+        """Switch auto/manual; back in auto, today's plan is written if a program runs."""
+        async with self.lock:
+            try:
+                reply = await set_mode(self.host, self.port, auto)
+            except K7Error as err:
+                raise HomeAssistantError(f"Mode change failed: {err}") from err
+            if not acked(reply):
+                raise HomeAssistantError("Lamp did not acknowledge the mode change")
+            _LOGGER.info("%s switched to %s mode", self.host, "auto" if auto else "manual")
+            try:
+                self.async_set_updated_data(await self._read())
+            except K7Error:
+                pass  # the next poll will catch up
+        if auto and self.program() is not None:
+            await self.async_rebuild()
 
     # --- Program: target schedule in HA + acclimation + moonlight, rebuilt daily ---
 

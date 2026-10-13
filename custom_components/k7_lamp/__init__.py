@@ -24,7 +24,7 @@ from .websocket import async_register_websocket_commands
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SENSOR]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.BUTTON, Platform.SELECT, Platform.SENSOR]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 CARD_URL = f"{URL_BASE}/{CARD_FILE}?v={FRONTEND_VERSION}"
 
@@ -194,6 +194,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: K7ConfigEntry) -> bool:
             _LOGGER.warning("Daily clock sync failed: %s", err)
 
     async def _acclimation_step(_now=None) -> None:
+        if coordinator.data is not None and not coordinator.data.auto:
+            _LOGGER.debug("%s is in manual mode; skipping the daily plan", entry.title)
+            return
         try:
             await coordinator.async_rebuild()
         except Exception as err:  # noqa: BLE001

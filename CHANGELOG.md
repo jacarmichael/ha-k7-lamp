@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0b1 (beta)
+
+- Mode select (auto/manual). While the lamp is in manual mode the daily plan write is skipped; switching back to auto writes today's plan.
+- Docs: master/slave groups work (pair the slave in the app, add only the master to Home Assistant).
+
 ## 0.5.1
 
 - Pass Home Assistant's hassfest validation (manifest key order, no braces in action descriptions).
