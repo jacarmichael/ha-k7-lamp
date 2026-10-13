@@ -16,7 +16,7 @@ Local control of a **Noo-Psyche K7 Pro** reef light from Home Assistant, over yo
   - acclimation intensity
   - moonlight level
   - a connectivity check
-- **Mode selector:** switch the lamp between auto (runs the schedule) and manual (fixed levels).
+- **Mode selector and manual levels:** switch the lamp between auto (runs the schedule) and manual (fixed levels). Moving a channel's manual level slider puts the lamp in manual; switching back to auto returns it to its schedule, which is never changed by manual control.
 - **Schedule editor card:**
   - drag the 24-hour curve for each channel, or fine-tune one hour with sliders
   - a colour preview strip shows the blended colour for each hour
@@ -105,7 +105,7 @@ lovelace:
 
 - **Cannot connect:** check the IP, that the lamp is in LAN mode, and your firewall/VLAN rules for TCP 8266 from the HA host.
 - **Card doesn't show:** hard-refresh the browser. In the companion app, use Settings → Companion app → Debugging → Reset frontend cache.
-- **Testing by hand:** `tools/k7_test.py --host <lamp-ip> status` reads the lamp from any computer with Python 3.9+. Other commands write to the lamp, so only run them while you can watch the tank.
+- **Testing by hand:** from the `custom_components/k7_lamp` folder (installed, or in a copy of this repo), `python3 tools/k7_test.py --host <lamp-ip> status` reads the lamp. It needs only Python 3.9+, so it also runs on a laptop. Other commands write to the lamp, so only run them while you can watch the tank.
 
 ## Credits
 

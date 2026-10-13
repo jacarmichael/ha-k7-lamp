@@ -131,7 +131,7 @@ async def read_all(host: str, port: int, timeout: float = 6.0) -> K7State:
     raise K7Error(f"unrecognised reply ({len(data)} bytes): {data.hex(' ')}")
 
 
-# --- Write commands (not used by the integration yet; exercised by tools/k7_test.py) ---
+# --- Write commands (not used by the integration yet; exercised by tools/k7_test.py in this folder) ---
 # ALL_SET (10 07) is deliberately not implemented: it blocks the lamp and rewrites flash.
 
 CMD_SYNC_TIME = (0x10, 0x03)

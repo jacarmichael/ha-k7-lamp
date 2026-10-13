@@ -22,7 +22,7 @@ import sys
 from datetime import datetime, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# Works from the repo (tools/) and from inside an installed custom_components/k7_lamp/tools/.
+# Lives in custom_components/k7_lamp/tools/ (so HACS installs it); protocol.py is one folder up.
 for _p in (os.path.join(_HERE, "..", "custom_components", "k7_lamp"), os.path.join(_HERE, "..")):
     if os.path.exists(os.path.join(_p, "protocol.py")):
         sys.path.insert(0, os.path.abspath(_p))
@@ -110,7 +110,9 @@ async def main():
             print("schedule identical after write" if same else "!! schedule differs after write")
         else:
             raise SystemExit(__doc__)
-        if a.cmd != "status":
+        if a.cmd in ("manual", "levels"):
+            await asyncio.sleep(5.0)  # the lamp ignores ALL_READ for a few seconds after HAND_LUMINANCE
+        elif a.cmd != "status":
             await asyncio.sleep(1.0)
         await status(h, p)
     except K7Error as err:

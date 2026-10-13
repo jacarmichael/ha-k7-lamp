@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.0b2 (beta)
+
+- `tools/k7_test.py` now ships inside the integration, so HACS installs it and updates no longer remove it.
+- Manual level sliders for each channel. Moving one puts the lamp in manual mode; the schedule is left alone, so switching back to auto returns to it.
+
 ## 0.6.0b1 (beta)
 
 - Mode select (auto/manual). While the lamp is in manual mode the daily plan write is skipped; switching back to auto writes today's plan.

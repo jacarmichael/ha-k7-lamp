@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from typing import Any
 
@@ -26,6 +27,7 @@ from .protocol import (
     acked,
     photoperiod,
     read_all,
+    set_levels,
     set_mode,
     state_rows,
     sync_time,
@@ -129,6 +131,28 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
                 pass  # the next poll will catch up
         if auto and self.program() is not None:
             await self.async_rebuild()
+
+    async def async_set_manual_level(self, channel: int, value: int) -> None:
+        """Set one channel's manual level, switching to manual first; the schedule is untouched."""
+        async with self.lock:
+            levels = list(self.data.manual)
+            levels[channel] = value
+            try:
+                if self.data.auto:
+                    if not acked(await set_mode(self.host, self.port, False)):
+                        raise HomeAssistantError("Lamp did not acknowledge the switch to manual")
+                    await asyncio.sleep(0.5)
+                reply = await set_levels(self.host, self.port, levels)
+            except K7Error as err:
+                raise HomeAssistantError(f"Setting levels failed: {err}") from err
+            if not acked(reply):
+                raise HomeAssistantError("Lamp did not acknowledge the new levels")
+            # The lamp doesn't answer ALL_READ for a few seconds after HAND_LUMINANCE,
+            # so record the new levels here and let the next poll confirm them.
+            self.async_set_updated_data(replace(self.data, auto=False, manual=levels))
+        # Keep the program's copy in step, so going back to auto doesn't rewrite the old levels.
+        if (prog := self.program()) is not None:
+            await self._store.async_set(self._id, {**prog, "target_manual": levels})
 
     # --- Program: target schedule in HA + acclimation + moonlight, rebuilt daily ---
 

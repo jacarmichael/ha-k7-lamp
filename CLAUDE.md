@@ -6,10 +6,10 @@ Home Assistant custom integration (HACS) for the **Noo-Psyche K7 Pro** reef ligh
 
 ```sh
 pytest -q                                     # unit tests (only needs pytest, not Home Assistant)
-python3 tools/k7_test.py --host <ip> status   # read a real lamp (safe)
+python3 custom_components/k7_lamp/tools/k7_test.py --host <ip> status   # read a real lamp (safe)
 ```
 
-`tools/k7_test.py` subcommands other than `status` **write to real hardware**. Never run them unless the user is watching the tank.
+`k7_test.py` subcommands other than `status` **write to real hardware**. Never run them unless the user is watching the tank. The script lives inside the integration so HACS installs it (HACS replaces the whole `k7_lamp` folder on update, so anything copied in by hand is lost); it imports `protocol.py` from the folder above it.
 
 CI (`.github/workflows/`) runs `pytest` on Python 3.13, plus **hassfest** and the **HACS action**. There is no lint step.
 
@@ -30,7 +30,7 @@ Keep these modules free of `homeassistant` imports. `tests/conftest.py` builds a
 - `coordinator.py` (`K7Coordinator`): one per lamp. An `asyncio.Lock` serialises all lamp I/O, because the lamp copes badly with concurrent clients, and `_read()` retries once. `async_apply_schedule` re-reads first and **skips the write if the lamp already has that schedule**. The coordinator also holds the program logic (`async_set_target`, acclimation, moon, day-start pref).
 - `program.py` / `profiles.py`: `Store` wrappers for `.storage/k7_lamp.program` (`{"programs": {entry_id: …}, "prefs": {entry_id: {"day_start": h}}}`) and `.storage/k7_lamp.profiles`. `ProgramStore._migrate` imports the old v0.3.0 `k7_lamp.acclimation` store.
 - `websocket.py`: the `k7_lamp/*` commands used by the card. Every mutating command uses `@require_admin`. `_lamps()` builds the payload the card renders from.
-- `sensor.py`, `binary_sensor.py`, `button.py`, `select.py`, `entity.py`, `config_flow.py`: entities and the config flow. The Mode select calls `async_set_mode()` (`CHANGE_MODE`, `10 04`). The config flow only reads from the lamp, uses the lamp's reported name (e.g. `K7_Pro12345`) as its unique id, and aborts for the Mini.
+- `sensor.py`, `binary_sensor.py`, `button.py`, `select.py`, `number.py`, `entity.py`, `config_flow.py`: entities and the config flow. The Mode select calls `async_set_mode()` (`CHANGE_MODE`, `10 04`). The per-channel manual level numbers call `async_set_manual_level()` (`HAND_LUMINANCE`, `10 05`), which switches to manual first and also updates the program's `target_manual` so returning to auto doesn't trigger an `ALL_SET` just for the manual levels. The config flow only reads from the lamp, uses the lamp's reported name (e.g. `K7_Pro12345`) as its unique id, and aborts for the Mini.
 
 ### The "program" model
 - **No program** (the default): Apply writes the schedule straight to the lamp.
