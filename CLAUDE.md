@@ -30,7 +30,7 @@ Keep these modules free of `homeassistant` imports. `tests/conftest.py` builds a
 - `coordinator.py` (`K7Coordinator`): one per lamp. An `asyncio.Lock` serialises all lamp I/O, because the lamp copes badly with concurrent clients, and `_read()` retries once. `async_apply_schedule` re-reads first and **skips the write if the lamp already has that schedule**. The coordinator also holds the program logic (`async_set_target`, acclimation, moon, day-start pref).
 - `program.py` / `profiles.py`: `Store` wrappers for `.storage/k7_lamp.program` (`{"programs": {entry_id: …}, "prefs": {entry_id: {"day_start": h}}}`) and `.storage/k7_lamp.profiles`. `ProgramStore._migrate` imports the old v0.3.0 `k7_lamp.acclimation` store.
 - `websocket.py`: the `k7_lamp/*` commands used by the card. Every mutating command uses `@require_admin`. `_lamps()` builds the payload the card renders from.
-- `sensor.py`, `binary_sensor.py`, `button.py`, `select.py`, `number.py`, `entity.py`, `config_flow.py`: entities and the config flow. The Mode select calls `async_set_mode()` (`CHANGE_MODE`, `10 04`). The per-channel manual level numbers call `async_set_manual_level()` (`HAND_LUMINANCE`, `10 05`), which switches to manual first and also updates the program's `target_manual` so returning to auto doesn't trigger an `ALL_SET` just for the manual levels. The config flow only reads from the lamp, uses the lamp's reported name (e.g. `K7_Pro12345`) as its unique id, and aborts for the Mini.
+- `sensor.py`, `binary_sensor.py`, `button.py`, `select.py`, `number.py`, `entity.py`, `config_flow.py`: entities and the config flow. The Mode select calls `async_set_mode()` (`CHANGE_MODE`, `10 04`). The per-channel manual level numbers call `async_set_manual_level()` (`HAND_LUMINANCE`, `10 05`), via `async_set_manual_levels()`, which switches to manual first, marks the lamp busy for `HAND_SETTLE` seconds (it ignores `ALL_READ` after `HAND_LUMINANCE`; every locked lamp access calls `_settle()` first), and updates the program's `target_manual` so returning to auto doesn't trigger an `ALL_SET` just for the manual levels. The config flow only reads from the lamp, uses the lamp's reported name (e.g. `K7_Pro12345`) as its unique id, and aborts for the Mini.
 
 ### The "program" model
 - **No program** (the default): Apply writes the schedule straight to the lamp.
@@ -39,6 +39,7 @@ Keep these modules free of `homeassistant` imports. `tests/conftest.py` builds a
 - When acclimation finishes or is stopped and moonlight is off, `async_rebuild` writes the plain target and **clears the program**, which returns the lamp to direct writes.
 
 ### Frontend (`frontend/k7-schedule-card.js`)
+The card's **Manual…** panel uses `k7_lamp/set_mode` and `k7_lamp/set_manual`; slider moves are debounced (700 ms) and sent one request at a time with all six levels.
 The card is a vanilla custom element (`custom:k7-schedule-card`) with no build step. It talks to HA only through `hass.callWS` with the `k7_lamp/*` types. It lazy-loads the vendored Chart.js, dragdata, jsQR and QRCode.js from `/k7_lamp/vendor/`, and fetches `presets.json` (from bitbarista's community presets). It contains JS copies of `day_start` / `photoperiod` / `shift_rows` / `align_day_start`; **keep them in sync with `protocol.py`**. Don't edit the files in `frontend/vendor/`.
 
 ## Data conventions
@@ -52,6 +53,8 @@ The card is a vanilla custom element (`custom:k7-schedule-card`) with no build s
 - **Versions:** `manifest.json` `version` is the release version, and each release gets a `CHANGELOG.md` entry. The card's cache-buster is separate. When the card or vendor files change, bump `FRONTEND_VERSION` in `const.py`, `VERSION` in `k7-schedule-card.js`, and the `?v=` in the README's YAML-mode resource URL, all together. The card resource is re-registered automatically when the URL changes.
 - **Translations:** `strings.json` and `translations/en.json` are identical, so edit both.
 - **hassfest:** `manifest.json` keys must be ordered `domain`, `name`, then alphabetical. Don't put `{}` braces in action/field descriptions, because HA treats them as placeholders.
+- `select.py` and `number.py` are HA platform names; `select.py` shadows the stdlib `select` module if `custom_components/k7_lamp` is first on `sys.path`. Don't run Python with that folder as the working directory or script directory unless the stdlib is already imported (`k7_test.py` imports `asyncio` before adding the folder to the path, so it's fine).
+- The card logs `K7-SCHEDULE-CARD <version>` to the browser console on load; use it to check that a page isn't still running an older card after an update.
 - New actions need a schema in `__init__.py`, an entry in `services.yaml`, and strings in both translation files.
 - `NOTICE.md` exists both at the repo root and in `custom_components/k7_lamp/`, which ships with HACS installs. Keep both copies identical.
 - Some comments in `protocol.py` are stale: the module docstring says "Read-only", and the section comments say write commands are unused and `ALL_SET` isn't implemented. In fact the integration uses `sync_time` and `write_all_set`.

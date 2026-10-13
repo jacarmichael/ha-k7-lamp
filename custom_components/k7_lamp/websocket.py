@@ -63,7 +63,7 @@ def async_register_websocket_commands(hass: HomeAssistant) -> None:
     for handler in (ws_get, ws_save_profile, ws_delete_profile, ws_apply,
                     ws_sync_clock, ws_parse_qr, ws_to_qr,
                     ws_start_acclimation, ws_stop_acclimation,
-                    ws_set_moonlight, ws_set_day_start):
+                    ws_set_moonlight, ws_set_day_start, ws_set_mode, ws_set_manual):
         websocket_api.async_register_command(hass, handler)
 
 
@@ -262,4 +262,44 @@ async def ws_set_day_start(hass, connection, msg):
     if (coordinator := _coordinator(hass, connection, msg)) is None:
         return
     await coordinator.async_set_day_start_pref(msg["hour"])
+    connection.send_result(msg["id"], {"lamps": _lamps(hass)})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "k7_lamp/set_mode",
+        vol.Required("entry_id"): str,
+        vol.Required("auto"): bool,
+    }
+)
+@websocket_api.async_response
+async def ws_set_mode(hass, connection, msg):
+    if (coordinator := _coordinator(hass, connection, msg)) is None:
+        return
+    try:
+        await coordinator.async_set_mode(msg["auto"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "lamp_error", str(err))
+        return
+    connection.send_result(msg["id"], {"lamps": _lamps(hass)})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "k7_lamp/set_manual",
+        vol.Required("entry_id"): str,
+        vol.Required("levels"): LEVELS,
+    }
+)
+@websocket_api.async_response
+async def ws_set_manual(hass, connection, msg):
+    if (coordinator := _coordinator(hass, connection, msg)) is None:
+        return
+    try:
+        await coordinator.async_set_manual_levels(msg["levels"])
+    except HomeAssistantError as err:
+        connection.send_error(msg["id"], "lamp_error", str(err))
+        return
     connection.send_result(msg["id"], {"lamps": _lamps(hass)})

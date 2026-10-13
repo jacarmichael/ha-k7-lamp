@@ -6,7 +6,7 @@
  * bundled presets come from bitbarista/k7-led-controller (MIT); see NOTICE.md.
  */
 const BASE = "/k7_lamp";
-const VERSION = "0.5.0";
+const VERSION = "0.6.0b6";
 const COLORS = ["#f5f5f5", "#3b3bff", "#22c55e", "#9b30ff", "#00d5ff", "#ff3030"];
 
 const loaded = {};
@@ -108,7 +108,9 @@ class K7ScheduleCard extends HTMLElement {
       // Pick up lamp changes (mode, availability, schedule edited in the app).
       this._last = Date.now();
       const before = JSON.stringify(this._lamp);
+      const clean = !this._dirty();
       this._refresh().then(() => {
+        if (clean) this._draft = clone(this._baseline());
         if (JSON.stringify(this._lamp) !== before && !this._panel) this._render();
       }).catch(() => {});
     }
@@ -186,8 +188,11 @@ class K7ScheduleCard extends HTMLElement {
     return this._draft && this._lamp && rowsKey(this._draft) !== rowsKey(this._baseline());
   }
 
+  // An unedited draft follows the lamp; one with edits is kept as it is.
   _updateLamp(res) {
+    const clean = !this._dirty();
     this._lamp = res.lamps.find((l) => l.entry_id === this._lamp.entry_id) || this._lamp;
+    if (clean) this._draft = clone(this._baseline());
   }
 
   _error(err) {
@@ -323,6 +328,7 @@ class K7ScheduleCard extends HTMLElement {
         <button data-act="sync">Sync clock</button>
         <button data-act="acc" ${this._acc() ? "disabled" : ""}>Acclimate…</button>
         <button data-act="moon">Moonlight…</button>
+        <button data-act="manual">Manual…</button>
         <span class="grow"></span>
         <button data-act="revert" ${this._dirty() ? "" : "disabled"}>Revert</button>
         <button class="primary" data-act="apply" ${this._dirty() && this._lamp.available ? "" : "disabled"}>${this._acc() ? "Update target" : "Apply to lamp"}</button>
@@ -368,6 +374,22 @@ class K7ScheduleCard extends HTMLElement {
           <div class="row mchs">${chans}</div>
           <div class="row"><span class="grow"></span><button data-act="cancel">Cancel</button>
           <button class="primary" data-act="moon-save">Save moonlight</button></div></div>`;
+      }
+      case "manual": {
+        const auto = this._lamp.auto;
+        const sliders = this._channels.map((c, i) => `<div class="sl"><span class="lbl"><i style="background:${COLORS[i]}"></i>${esc(c)}</span>
+            <input type="range" min="0" max="100" value="${this._man[i]}" data-man="${i}">
+            <input type="number" min="0" max="100" value="${this._man[i]}" data-mannum="${i}"></div>`).join("");
+        return `<div class="panel">
+          <p>Fixed manual levels for the lamp. Moving a slider sends it to the lamp and puts the lamp in
+          manual mode. The schedule above is not changed.</p>
+          <div class="manual">${sliders}</div>
+          <div class="row">
+            <span class="muted small" data-manstatus>${esc(this._manStatus || "")}</span>
+            <span class="grow"></span>
+            ${auto ? "" : `<button data-act="mode-auto">Back to schedule</button>`}
+            <button data-act="cancel">Close</button>
+          </div></div>`;
       }
       case "acc-stop":
         return `<div class="panel">
@@ -519,6 +541,17 @@ class K7ScheduleCard extends HTMLElement {
       if (num) num.value = e.target.value;
     });
     on("[data-act]", "click", (e) => this._action(e.currentTarget.dataset.act, e));
+    on("[data-man]", "input", (e) => {
+      const num = root.querySelector(`[data-mannum="${e.target.dataset.man}"]`);
+      if (num) num.value = e.target.value;
+    });
+    on("[data-man],[data-mannum]", "change", (e) => {
+      const ch = +(e.target.dataset.man ?? e.target.dataset.mannum);
+      this._man[ch] = clamp(e.target.value);
+      root.querySelector(`[data-man="${ch}"]`).value = this._man[ch];
+      root.querySelector(`[data-mannum="${ch}"]`).value = this._man[ch];
+      this._queueManual();
+    });
     on("[data-act=pick]", "change", (e) => this._pick(e.target.value));
     on("[data-act=link]", "change", (e) => (this._linked = e.target.checked));
     on("[data-act=keeptimes]", "change", (e) => { this._keepTimes = !e.target.checked; });
@@ -592,6 +625,19 @@ class K7ScheduleCard extends HTMLElement {
           return this._info(this._acc() ? "Draft reset to the acclimation target." : "Draft reset to the lamp's schedule.");
         case "acc": this._panel = "acc"; return this._render();
         case "moon": this._panel = "moon"; return this._render();
+        case "manual":
+          this._man = clone(this._lamp.manual);
+          this._manStatus = "";
+          this._panel = "manual";
+          return this._render();
+        case "mode-auto": {
+          this._manStatus = "Switching back to the schedule…";
+          this._render();
+          const res = await this._ws({ type: "k7_lamp/set_mode", entry_id: this._lamp.entry_id, auto: true });
+          this._updateLamp(res);
+          this._manStatus = "Back on the schedule.";
+          return this._render();
+        }
         case "moon-save": {
           const root = this.shadowRoot;
           const val = (k) => root.querySelector(`[data-moon=${k}]`);
@@ -674,6 +720,41 @@ class K7ScheduleCard extends HTMLElement {
     } catch (err) {
       this._error(err);
     }
+  }
+
+  // ---------- manual levels ----------
+
+  // The lamp is busy for a few seconds after each change, so wait for a pause in
+  // the slider moves, send all six levels at once, and never overlap requests.
+  _queueManual() {
+    clearTimeout(this._manTimer);
+    this._setManStatus("Waiting…");
+    this._manTimer = setTimeout(() => this._sendManual(), 700);
+  }
+
+  async _sendManual() {
+    if (this._manBusy) { this._manAgain = true; return; }
+    this._manBusy = true;
+    const levels = clone(this._man);
+    this._setManStatus("Sending to the lamp…");
+    try {
+      const res = await this._ws({ type: "k7_lamp/set_manual", entry_id: this._lamp.entry_id, levels });
+      this._updateLamp(res);
+      // Keep schedule edits, but take the new manual levels so Apply doesn't undo them.
+      this._draft.manual = clone(this._baseline().manual);
+      this._manStatus = "On the lamp (manual mode).";
+    } catch (err) {
+      this._manStatus = `Failed: ${err?.message || err}`;
+    }
+    this._manBusy = false;
+    if (this._manAgain) { this._manAgain = false; return this._sendManual(); }
+    if (this._panel === "manual") this._render();
+  }
+
+  _setManStatus(text) {
+    this._manStatus = text;
+    const el = this.shadowRoot.querySelector("[data-manstatus]");
+    if (el) el.textContent = text;
   }
 
   // ---------- QR import ----------
@@ -817,12 +898,14 @@ const STYLE = `
   .mch { display: inline-flex; align-items: center; gap: 4px; }
   .mch i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; border: 1px solid #8886; }
   .mch input { width: 52px; }
+  .manual .sl { margin: 4px 0; }
   .qr { display: flex; justify-content: center; padding: 12px; background: #fff; border-radius: 6px; margin-bottom: 8px; }
   video { width: 100%; max-height: 320px; border-radius: 6px; margin-top: 8px; background: #000; }
   @media (max-width: 500px) { .sl { grid-template-columns: 90px 1fr 50px; } .cell span { display: none; } }
 `;
 
 customElements.define("k7-schedule-card", K7ScheduleCard);
+console.info(`%c K7-SCHEDULE-CARD %c ${VERSION} `, "background:#3b3bff;color:#fff", "");
 window.customCards = window.customCards || [];
 window.customCards.push({
   type: "k7-schedule-card",

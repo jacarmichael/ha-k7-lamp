@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0b6 (beta)
+
+- The card logs its version to the browser console, to check which version a page is running.
+- Schedule card: the "Matches / Draft differs" label now follows changes made to the lamp (manual levels, mode, the app) instead of needing a reload, and Apply can no longer write old manual levels back.
+- Schedule card: **Manual…** panel with live manual level sliders, and a **Back to schedule** button while the lamp is in manual. Slider moves are batched and sent once you pause.
+- The integration waits out the few seconds the lamp is busy after a level change before talking to it again, so quick successive changes and the regular poll no longer fail.
+
 ## 0.6.0b2 (beta)
 
 - `tools/k7_test.py` now ships inside the integration, so HACS installs it and updates no longer remove it.

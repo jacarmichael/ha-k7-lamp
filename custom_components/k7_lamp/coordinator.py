@@ -16,7 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .acclimation import day_number, percent_for, scale
-from .const import ALL_SET_SETTLE, DOMAIN, SCAN_INTERVAL
+from .const import ALL_SET_SETTLE, DOMAIN, HAND_SETTLE, SCAN_INTERVAL
 from .moon import moon_illumination, moon_level, phase_icon, phase_name, rise_set
 from .effective import DEFAULT_MOON, build_effective, rebuild_time
 from .program import ProgramStore
@@ -52,6 +52,12 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
         self.host: str = entry.data[CONF_HOST]
         self.port: int = entry.data[CONF_PORT]
         self.lock = asyncio.Lock()
+        self._busy_until = 0.0  # loop time until which the lamp ignores us (after HAND_LUMINANCE)
+
+    async def _settle(self) -> None:
+        """Wait until the lamp answers again; call with the lock held."""
+        if (wait := self._busy_until - self.hass.loop.time()) > 0:
+            await asyncio.sleep(wait)
 
     async def _read(self) -> K7State:
         """ALL_READ with one retry; the lamp copes badly with concurrent clients."""
@@ -63,6 +69,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
 
     async def _async_update_data(self) -> K7State:
         async with self.lock:
+            await self._settle()
             try:
                 return await self._read()
             except K7Error as err:
@@ -76,6 +83,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
             raise HomeAssistantError(f"Invalid schedule: {err}") from err
         schedule = sorted(list(r) for r in schedule)
         async with self.lock:
+            await self._settle()
             try:
                 current = await self._read()
             except K7Error as err:
@@ -106,6 +114,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
     async def async_sync_clock(self) -> None:
         """Send HA's local time; the lamp runs its schedule on this clock."""
         async with self.lock:
+            await self._settle()
             now = dt_util.now()
             try:
                 reply = await sync_time(self.host, self.port, now.hour, now.minute, now.second)
@@ -118,6 +127,7 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
     async def async_set_mode(self, auto: bool) -> None:
         """Switch auto/manual; back in auto, today's plan is written if a program runs."""
         async with self.lock:
+            await self._settle()
             try:
                 reply = await set_mode(self.host, self.port, auto)
             except K7Error as err:
@@ -133,10 +143,28 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
             await self.async_rebuild()
 
     async def async_set_manual_level(self, channel: int, value: int) -> None:
-        """Set one channel's manual level, switching to manual first; the schedule is untouched."""
+        """Set one channel's manual level, keeping the others."""
+        await self._async_write_manual(channel, value)
+
+    async def async_set_manual_levels(self, levels: list[int]) -> None:
+        """Set all six manual levels."""
+        if len(levels) != 6 or any(not 0 <= v <= 100 for v in levels):
+            raise HomeAssistantError("Need 6 levels from 0 to 100")
+        await self._async_write_manual(None, list(levels))
+
+    async def _async_write_manual(self, channel: int | None, value: int | list[int]) -> None:
+        """HAND_LUMINANCE, switching to manual first; the schedule is untouched.
+
+        One channel is merged into the current levels inside the lock, so quick
+        changes to different channels don't overwrite each other.
+        """
         async with self.lock:
-            levels = list(self.data.manual)
-            levels[channel] = value
+            await self._settle()
+            if channel is None:
+                levels = value
+            else:
+                levels = list(self.data.manual)
+                levels[channel] = value
             try:
                 if self.data.auto:
                     if not acked(await set_mode(self.host, self.port, False)):
@@ -145,10 +173,11 @@ class K7Coordinator(DataUpdateCoordinator[K7State]):
                 reply = await set_levels(self.host, self.port, levels)
             except K7Error as err:
                 raise HomeAssistantError(f"Setting levels failed: {err}") from err
+            # The lamp doesn't answer for a few seconds after HAND_LUMINANCE, so record
+            # the new levels here and let the next poll (which waits) confirm them.
+            self._busy_until = self.hass.loop.time() + HAND_SETTLE
             if not acked(reply):
                 raise HomeAssistantError("Lamp did not acknowledge the new levels")
-            # The lamp doesn't answer ALL_READ for a few seconds after HAND_LUMINANCE,
-            # so record the new levels here and let the next poll confirm them.
             self.async_set_updated_data(replace(self.data, auto=False, manual=levels))
         # Keep the program's copy in step, so going back to auto doesn't rewrite the old levels.
         if (prog := self.program()) is not None:

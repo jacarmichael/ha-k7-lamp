@@ -78,7 +78,7 @@ If your dashboards are in **YAML mode**, add the resource yourself:
 ```yaml
 lovelace:
   resources:
-    - url: /k7_lamp/k7-schedule-card.js?v=0.5.0
+    - url: /k7_lamp/k7-schedule-card.js?v=0.6.0b6
       type: module
 ```
 
@@ -88,6 +88,7 @@ lovelace:
 - **Load…:** choose a saved profile, a preset or the current schedule. Loaded schedules are shifted to your *Day starts at* hour unless you untick "Align loaded profiles".
 - **Import QR / Show QR:** exchange schedules with the Noo-Psyche app and other reefers.
 - **Acclimate…:** set a start % and a number of days. A banner shows the current day and %, with a Stop button. When you stop, you can keep the current level or go straight to the full schedule.
+- **Manual…:** set the six manual levels with sliders. Changes go to the lamp as soon as you stop moving a slider and put it in manual mode. The schedule is not changed; **Back to schedule** returns the lamp to it.
 - **Moonlight…:**
   - **Level at full moon:** 15% by default.
   - **Channels:** Royal Blue 100% and Cyan 70% by default.
